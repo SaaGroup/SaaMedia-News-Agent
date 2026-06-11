@@ -6,7 +6,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
 
 const app = express();
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
+const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
 
@@ -403,9 +403,19 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
     addLog("info", `Launching web crawler to extract full article text and images: ${url}`, "scraper");
     const response = await fetch(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "max-age=0",
+        "Referer": "https://www.google.com/",
+        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1"
       },
       redirect: "follow",
       signal: AbortSignal.timeout(10000) // 10 seconds timeout
@@ -540,6 +550,7 @@ async function runAIElegancyAgent(
 }> {
   try {
     const ai = await getGeminiClient();
+    addLog("info", `Editorial Agent research triggered for "${originalTitle}"`, "summarizer");
     
     // Fetch full webpage context first
     let textToAnalyze = originalSnippet;
@@ -560,7 +571,7 @@ async function runAIElegancyAgent(
       : "No image URLs could be extracted from the source website.";
 
     const userPrompt = `You are the Lead Editorial AI Agent for "SaaMedia News Agent", an elite Nigerian news portal.
-Your task is to take this news raw details and draft a highly comprehensive, premium full-length news article.
+Your task is to take these news details and draft a highly comprehensive, premium full-length news article.
 
 SOURCE DETAILS:
 - Original Title: "${originalTitle}"
@@ -576,25 +587,46 @@ INSTRUCTIONS:
 1. Write a Captivating, SEO-Optimized Title (polished, professional, customized for high engagement).
 2. Write a Professional Short Summary (1-2 sentences) of the core development.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
-4. Write a highly detailed, comprehensive full-length news story (at least 3-5 paragraph narrative, fully rich in information, numbers, quotes, and context) formatted in HTML.
+4. Write a highly detailed, comprehensive full-length news story (at least 3-5 rich narrative paragraphs, featuring detailed context, numbers, quotes, and background) formatted in HTML.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
-   - At the VERY top of the article contentHtml, you MUST embed the Main Featured Image if one is available. Choose the absolute best image among the extracted list (or use this default candidate: ${crawlerFeaturedImage || "none"}). Embed it beautifully like:
+   - You MUST embed a beautiful featured image at the VERY top of the article contentHtml.
+   - If the original article crawled images list is empty, or only contains unusable URLs, you MUST select one of these highly relevant high-resolution photo URLs based on your category:
+     * Politics / National Policy:
+       https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?q=80&w=1000&auto=format&fit=crop
+       https://images.unsplash.com/photo-1529107386315-e1a2ed48a620?q=80&w=1000&auto=format&fit=crop
+     * National / Daily Life / Public:
+       https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop
+       https://images.unsplash.com/photo-1565538810844-1e119add165a?q=80&w=1000&auto=format&fit=crop
+     * Business & Finance / Economy / Oil:
+       https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?q=80&w=1000&auto=format&fit=crop
+       https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?q=80&w=1000&auto=format&fit=crop
+       https://images.unsplash.com/photo-1518709268805-4e9042af9f23?q=80&w=1000&auto=format&fit=crop
+     * Security / Defense / Police:
+       https://images.unsplash.com/photo-1557597774-9d273605dfa9?q=80&w=1000&auto=format&fit=crop
+       https://images.unsplash.com/photo-1450133064473-71024230f91b?q=80&w=1000&auto=format&fit=crop
+     
+     Embed the elected featured image beautifully like:
      <p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="SELECTED_FEATURED_IMAGE" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>
-   - If other images are available in the list, contextually place at least 1 or 2 of them inside the article between paragraphs to make the article highly professional and rich in media! E.g.:
+     
+     - Contexually embed at least 1 secondary supporting image from the choices inside the article itself between paragraphs to enrich reading visual structures:
      <p align="center" style="margin: 25px 0;"><img class="aligncenter" src="SECONDARY_IMAGE_URL" alt="News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>
+     
+     - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
+     
    - At the absolute bottom of the contentHtml, append a professional, elegant Source Credit Block following verbatim this HTML styling structure:
      <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
      <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-       This news development was originally reported and published by our media partner <strong>${sourceName || "General Press"}</strong>. For original reporting, additional live broadcasts and more extensive updates, please check out the official coverage directly on <a href="${articleUrl || "#"}" target="_blank" rel="noopener noreferrer">${sourceName || "original site"}</a>.
+       This news development was originally reported by our media partner <a href="${articleUrl || "#"}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName || "General Press"} - ${articleUrl || "#"}</a>.
      </p>
-5. Decide which URL from the list represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
+
+5. Decide which URL represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
 
 Respond strictly in valid JSON format matching this schema:
 {
   "title": "Clean, engaging headline",
   "summary": "1-2 sentence quick news summary for WhatsApp or mobile grids",
   "category": "One of: Politics, Business, Security, Economy, National",
-  "featuredImage": "Selected image URL string or null",
+  "featuredImage": "Selected image URL string representing featured image",
   "contentHtml": "HTML string containing the full-length news content with embedded images and credit footer at the bottom"
 }
 
@@ -604,6 +636,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       model: "gemini-3.5-flash",
       contents: userPrompt,
       config: {
+        tools: [{ googleSearch: {} }],
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -619,17 +652,30 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       }
     });
 
-    const bodyText = response.text ? response.text.trim() : "";
+    let bodyText = response.text ? response.text.trim() : "";
+    if (bodyText.startsWith("```json")) {
+      bodyText = bodyText.substring(7);
+    }
+    if (bodyText.startsWith("```")) {
+      bodyText = bodyText.substring(3);
+    }
+    if (bodyText.endsWith("```")) {
+      bodyText = bodyText.substring(0, bodyText.length - 3);
+    }
+    bodyText = bodyText.trim();
+
     const parsed = JSON.parse(bodyText);
+    addLog("success", `Editorial AI Agent generated article successfully. Title: ${parsed.title}, Category: ${parsed.category}`, "summarizer");
     
     return {
       title: parsed.title || originalTitle,
       summary: parsed.summary || originalSnippet.substring(0, 150),
       category: parsed.category || "National",
       contentHtml: parsed.contentHtml || `<p>${originalSnippet}</p>`,
-      featuredImage: parsed.featuredImage || crawlerFeaturedImage || null
+      featuredImage: parsed.featuredImage || crawlerFeaturedImage || "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
     };
-  } catch (e) {
+  } catch (e: any) {
+    addLog("error", `Editorial AI Agent failed: ${e.message}. Using high-quality backup layout.`, "summarizer");
     console.error("Editorial AI Agent Failed, falling back...", e);
     // Generic high-quality backup matching user requirements
     let fallbackHtml = `<p>${originalSnippet || "Full details remain updated on the original news source official website."}</p>`;
@@ -637,7 +683,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       fallbackHtml += `
       <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
       <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-        This news development was originally reported and published by our media partner <strong>${sourceName}</strong>. For original reporting, additional live broadcasts and more extensive updates, please check out the official coverage directly on <a href="${articleUrl}" target="_blank" rel="noopener noreferrer">${sourceName}</a>.
+        This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} - ${articleUrl}</a>.
       </p>`;
     }
     return {
@@ -645,7 +691,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       summary: originalSnippet ? originalSnippet.substring(0, 150) + "..." : "Local news update from Nigerian top sources.",
       category: "National",
       contentHtml: fallbackHtml,
-      featuredImage: null
+      featuredImage: "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
     };
   }
 }
@@ -808,6 +854,7 @@ async function autoPublishFreshArticles() {
       article.category = aiEdit.category;
       article.content = aiEdit.contentHtml;
       article.featuredImage = aiEdit.featuredImage;
+      article.isEnriched = true;
       
       // Step B: Publish to WordPress
       addLog("info", `Publishing to WordPress [${config.wordpressMode.toUpperCase()}]: "${article.title}"`, "publisher");
@@ -967,6 +1014,38 @@ app.post("/api/scrape", async (req, res) => {
   });
 });
 
+// Explicitly trigger Editorial AI enrichment for an article draft
+app.post("/api/articles/:id/enrich", async (req, res) => {
+  const { id } = req.params;
+  const db = loadDb();
+  const article = db.articles.find((a: Article) => a.id === id);
+
+  if (!article) {
+    return res.status(404).json({ error: "Article not found" });
+  }
+
+  try {
+    const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
+    
+    article.title = aiEdit.title;
+    article.summary = aiEdit.summary;
+    article.category = aiEdit.category;
+    article.content = aiEdit.contentHtml;
+    article.featuredImage = aiEdit.featuredImage;
+    article.isEnriched = true;
+
+    const idx = db.articles.findIndex((a: Article) => a.id === id);
+    if (idx !== -1) {
+      db.articles[idx] = article;
+    }
+    saveDb(db);
+
+    res.json({ status: "ok", article });
+  } catch (err: any) {
+    res.status(500).json({ error: `Enrichment failed: ${err.message}` });
+  }
+});
+
 // Edit & Approve Draft Article before publishing
 app.post("/api/articles/:id/edit-approve", (req, res) => {
   const db = loadDb();
@@ -1004,13 +1083,15 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
   saveDb(db);
 
   try {
-    // 1. Editorial Summarization if empty (Lazy summarizes via Gemini)
-    if (!article.summary || article.summary === "") {
-      const aiEdit = await runAIElegancyAgent(article.title, article.content, article.url, article.source);
+    // 1. Editorial Summarization if not enriched yet (Lazy summarizes via Gemini)
+    if (!article.isEnriched && (!article.content || !article.content.includes("<p align="))) {
+      const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
+      article.title = aiEdit.title;
       article.summary = aiEdit.summary;
       article.category = aiEdit.category;
       article.content = aiEdit.contentHtml;
       article.featuredImage = aiEdit.featuredImage;
+      article.isEnriched = true;
     }
 
     addLog("info", `Force Publishing Article to WP: ${article.title}`, "publisher");
