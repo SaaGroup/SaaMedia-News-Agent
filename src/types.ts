@@ -15,6 +15,7 @@ export interface Article {
   whatsappError: string | null;
   publishError: string | null;
   featuredImage?: string | null;
+  isEnriched?: boolean;
 }
 
 export interface NewsSource {
