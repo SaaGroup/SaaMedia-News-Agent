@@ -6,7 +6,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 app.use(express.json({ limit: "50mb" }));
 
@@ -194,10 +194,65 @@ async function wordpressPublishXmlRpc(config: SystemConfig, title: string, htmlC
   return "success_xmlrpc";
 }
 
+// Upload image helper using WordPress REST API Media Endpoint
+async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string, filename: string): Promise<number | null> {
+  try {
+    const response = await fetch(imageUrl, {
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!response.ok) {
+      console.warn(`Failed to fetch original image for WP media library upload: ${imageUrl}`);
+      return null;
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const uploadUrl = `${config.wordpressUrl.replace(/\/$/, "")}/wp-json/wp/v2/media`;
+    const credentials = Buffer.from(`${config.wordpressUsername}:${config.wordpressPassword}`).toString("base64");
+
+    const wpRes = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${credentials}`,
+        "Content-Type": "image/jpeg",
+        "Content-Disposition": `attachment; filename="${filename}"`
+      },
+      body: buffer
+    });
+
+    if (wpRes.ok) {
+      const mediaData: any = await wpRes.json();
+      return mediaData.id ? Number(mediaData.id) : null;
+    } else {
+      const errText = await wpRes.text();
+      console.warn(`WordPress Media upload failed: ${wpRes.status} - ${errText}`);
+      return null;
+    }
+  } catch (err: any) {
+    console.error(`Error uploading featured image to WordPress:`, err);
+    return null;
+  }
+}
+
 // WordPress REST API Client Implementation
-async function wordpressPublishRest(config: SystemConfig, title: string, htmlContent: string, categoryName: string): Promise<string> {
+async function wordpressPublishRest(config: SystemConfig, title: string, htmlContent: string, categoryName: string, featuredImageUrl: string | null = null): Promise<string> {
   const apiUrl = `${config.wordpressUrl.replace(/\/$/, "")}/wp-json/wp/v2/posts`;
   const credentials = Buffer.from(`${config.wordpressUsername}:${config.wordpressPassword}`).toString("base64");
+
+  let featuredMediaId: number | null = null;
+  if (featuredImageUrl) {
+    featuredMediaId = await uploadMediaToWordPressRest(config, featuredImageUrl, `news-featured-${Date.now()}.jpg`);
+  }
+
+  const postPayload: any = {
+    title: title,
+    content: htmlContent,
+    status: "publish"
+  };
+
+  if (featuredMediaId) {
+    postPayload.featured_media = featuredMediaId;
+  }
 
   const response = await fetch(apiUrl, {
     method: "POST",
@@ -205,11 +260,7 @@ async function wordpressPublishRest(config: SystemConfig, title: string, htmlCon
       "Content-Type": "application/json",
       "Authorization": `Basic ${credentials}`
     },
-    body: JSON.stringify({
-      title: title,
-      content: htmlContent,
-      status: "publish"
-    })
+    body: JSON.stringify(postPayload)
   });
 
   if (!response.ok) {
@@ -338,30 +389,216 @@ async function getGeminiClient(): Promise<GoogleGenAI> {
   });
 }
 
+// Web Crawler helper to fetch raw HTML of original article and extract full text plus any image resources
+async function fetchFullPageAndImages(url: string, sourceName: string): Promise<{
+  fullText: string;
+  featuredImage: string | null;
+  imageUrls: string[];
+}> {
+  if (!url || url.includes("manual-") || url.includes("mock-url") || !url.startsWith("http")) {
+    return { fullText: "", featuredImage: null, imageUrls: [] };
+  }
+
+  try {
+    addLog("info", `Launching web crawler to extract full article text and images: ${url}`, "scraper");
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(10000) // 10 seconds timeout
+    });
+
+    if (!response.ok) {
+      addLog("warn", `Webpage crawler returned HTTP status ${response.status} for URL`, "scraper");
+      return { fullText: "", featuredImage: null, imageUrls: [] };
+    }
+
+    const html = await response.text();
+    const imageUrls: string[] = [];
+    let featuredImage: string | null = null;
+
+    // Extract Open Graph image
+    const ogRegex = /<meta\s+[^>]*property=["']og:image["']\s+[^>]*content=["']([^"']+)["']/i;
+    const ogRegexAlt = /<meta\s+[^>]*content=["']([^"']+)["']\s+[^>]*property=["']og:image["']/i;
+    const ogUrl = html.match(ogRegex)?.[1] || html.match(ogRegexAlt)?.[1];
+
+    if (ogUrl) {
+      featuredImage = ogUrl.trim();
+      imageUrls.push(ogUrl.trim());
+    }
+
+    // Extract Twitter card image
+    const twRegex = /<meta\s+[^>]*name=["']twitter:image["']\s+[^>]*content=["']([^"']+)["']/i;
+    const twRegexAlt = /<meta\s+[^>]*content=["']([^"']+)["']\s+[^>]*name=["']twitter:image["']/i;
+    const twUrl = html.match(twRegex)?.[1] || html.match(twRegexAlt)?.[1];
+
+    if (twUrl && !imageUrls.includes(twUrl.trim())) {
+      if (!featuredImage) featuredImage = twUrl.trim();
+      imageUrls.push(twUrl.trim());
+    }
+
+    // Extract standard images
+    const imgRegex = /<img\s+[^>]*src=["']([^"']+)["']/gi;
+    let match;
+    while ((match = imgRegex.exec(html)) !== null) {
+      let src = match[1].trim();
+      if (src.startsWith("//")) {
+        src = "https:" + src;
+      }
+      const isValid = src.startsWith("http") &&
+                      !src.includes("gravatar.com") &&
+                      !src.includes("pixel") &&
+                      !src.includes("analytics") &&
+                      !src.includes("logo") &&
+                      !src.includes("icon") &&
+                      !src.includes("cookie") &&
+                      !src.includes("divider") &&
+                      !src.includes("spinner") &&
+                      !src.includes("loader") &&
+                      !src.endsWith(".gif");
+      
+      if (isValid && !imageUrls.includes(src)) {
+        imageUrls.push(src);
+        if (!featuredImage) featuredImage = src;
+      }
+    }
+
+    // Clean body HTML and get clean text
+    let bodyHtml = html;
+    const bodyStart = html.indexOf("<body");
+    if (bodyStart !== -1) {
+      bodyHtml = html.substring(bodyStart);
+    }
+
+    bodyHtml = bodyHtml
+      .replace(/<script[\s\S]*?<\/script>/gi, "")
+      .replace(/<style[\s\S]*?<\/style>/gi, "")
+      .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+      .replace(/<header[\s\S]*?<\/header>/gi, "")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+      .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
+      .replace(/<aside[\s\S]*?<\/aside>/gi, "");
+
+    // Try to isolate main text block matching articles
+    let articleHtml = "";
+    const articleMatch = bodyHtml.match(/<article[\s\S]*?<\/article>/i);
+    if (articleMatch) {
+      articleHtml = articleMatch[0];
+    } else {
+      const divMatch = bodyHtml.match(/<div\s+[^>]*class=["'][^"']*(?:entry-content|post-content|article-content|story-body|main-content)[^"']*["'][\s\S]*?<\/div>/i);
+      if (divMatch) {
+        articleHtml = divMatch[0];
+      }
+    }
+
+    const targetHtml = articleHtml || bodyHtml;
+    let cleanText = targetHtml
+      .replace(/<p[^>]*>/gi, "\n\n")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (cleanText.length > 10000) {
+      cleanText = cleanText.substring(0, 10000) + "... [truncated]";
+    }
+
+    addLog("success", `Crawled original webpage successfully. Extracted ${cleanText.length} characters, featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
+
+    return {
+      fullText: cleanText,
+      featuredImage,
+      imageUrls: imageUrls.slice(0, 8)
+    };
+  } catch (err: any) {
+    addLog("error", `Web webpage crawler failed for ${url} (${err.message})`, "scraper");
+    return { fullText: "", featuredImage: null, imageUrls: [] };
+  }
+}
+
 // Editorial & Styling Agents
-async function runAIElegancyAgent(originalTitle: string, originalSnippet: string): Promise<{ title: string; summary: string; category: string; contentHtml: string }> {
+async function runAIElegancyAgent(
+  originalTitle: string,
+  originalSnippet: string,
+  articleUrl?: string,
+  sourceName?: string
+): Promise<{
+  title: string;
+  summary: string;
+  category: string;
+  contentHtml: string;
+  featuredImage: string | null;
+}> {
   try {
     const ai = await getGeminiClient();
     
-    const userPrompt = `You are the Lead Editorial AI Agent for "SaaMedia News Agent", a elite Nigerian news portal.
-Your task is to review this fetched Nigerian news article and write:
-1. Dynamic, SEO-Optimized Title (concise, captivating, optimized for Google search).
-2. Professional Summarized Briefing (1-2 sentences summarizing absolute core developments).
-3. Industry Category selection (Select ONLY ONE from: "Politics", "Business", "Security", "Economy", "National").
-4. A Polished Newspaper-Style Narrative Article formatted in HTML (using clean spacing, paragraph tags, bold, italic, no styling classes). It should read incredibly well, be objective and carry authority.
+    // Fetch full webpage context first
+    let textToAnalyze = originalSnippet;
+    let imagesFound: string[] = [];
+    let crawlerFeaturedImage: string | null = null;
 
-Fetched Headline: "${originalTitle}"
-Fetched Snippet Content: "${originalSnippet}"
+    if (articleUrl && sourceName) {
+      const crawl = await fetchFullPageAndImages(articleUrl, sourceName);
+      if (crawl.fullText) {
+        textToAnalyze = crawl.fullText;
+      }
+      imagesFound = crawl.imageUrls;
+      crawlerFeaturedImage = crawl.featuredImage;
+    }
+
+    const inputImagesText = imagesFound.length > 0
+      ? `Extracted Available Image URLs from Source Webpage:\n${imagesFound.map((img, i) => `[Image ${i + 1}]: ${img}`).join("\n")}`
+      : "No image URLs could be extracted from the source website.";
+
+    const userPrompt = `You are the Lead Editorial AI Agent for "SaaMedia News Agent", an elite Nigerian news portal.
+Your task is to take this news raw details and draft a highly comprehensive, premium full-length news article.
+
+SOURCE DETAILS:
+- Original Title: "${originalTitle}"
+- Source Publisher: "${sourceName || "Unknown"}"
+- Article Link: "${articleUrl || ""}"
+- Crawled Full Webpage Text Content:
+"${textToAnalyze}"
+
+MEDIA ASSETS:
+${inputImagesText}
+
+INSTRUCTIONS:
+1. Write a Captivating, SEO-Optimized Title (polished, professional, customized for high engagement).
+2. Write a Professional Short Summary (1-2 sentences) of the core development.
+3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
+4. Write a highly detailed, comprehensive full-length news story (at least 3-5 paragraph narrative, fully rich in information, numbers, quotes, and context) formatted in HTML.
+   - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
+   - At the VERY top of the article contentHtml, you MUST embed the Main Featured Image if one is available. Choose the absolute best image among the extracted list (or use this default candidate: ${crawlerFeaturedImage || "none"}). Embed it beautifully like:
+     <p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="SELECTED_FEATURED_IMAGE" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>
+   - If other images are available in the list, contextually place at least 1 or 2 of them inside the article between paragraphs to make the article highly professional and rich in media! E.g.:
+     <p align="center" style="margin: 25px 0;"><img class="aligncenter" src="SECONDARY_IMAGE_URL" alt="News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>
+   - At the absolute bottom of the contentHtml, append a professional, elegant Source Credit Block following verbatim this HTML styling structure:
+     <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+     <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+       This news development was originally reported and published by our media partner <strong>${sourceName || "General Press"}</strong>. For original reporting, additional live broadcasts and more extensive updates, please check out the official coverage directly on <a href="${articleUrl || "#"}" target="_blank" rel="noopener noreferrer">${sourceName || "original site"}</a>.
+     </p>
+5. Decide which URL from the list represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
 
 Respond strictly in valid JSON format matching this schema:
 {
   "title": "Clean, engaging headline",
   "summary": "1-2 sentence quick news summary for WhatsApp or mobile grids",
   "category": "One of: Politics, Business, Security, Economy, National",
-  "contentHtml": "<p>Professional first paragraph detailing when and where...</p><p>Second paragraph details standard analysis...</p>"
+  "featuredImage": "Selected image URL string or null",
+  "contentHtml": "HTML string containing the full-length news content with embedded images and credit footer at the bottom"
 }
 
-Ensure your response is valid JSON and only returns the JSON block.`;
+Ensure your response is valid JSON and only returns the JSON block. Do not wrap it in markdown codeblocks like \`\`\`json.`;
 
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
@@ -374,6 +611,7 @@ Ensure your response is valid JSON and only returns the JSON block.`;
             title: { type: Type.STRING },
             summary: { type: Type.STRING },
             category: { type: Type.STRING },
+            featuredImage: { type: Type.STRING, nullable: true },
             contentHtml: { type: Type.STRING }
           },
           required: ["title", "summary", "category", "contentHtml"]
@@ -383,20 +621,31 @@ Ensure your response is valid JSON and only returns the JSON block.`;
 
     const bodyText = response.text ? response.text.trim() : "";
     const parsed = JSON.parse(bodyText);
+    
     return {
       title: parsed.title || originalTitle,
       summary: parsed.summary || originalSnippet.substring(0, 150),
       category: parsed.category || "National",
-      contentHtml: parsed.contentHtml || `<p>${originalSnippet}</p>`
+      contentHtml: parsed.contentHtml || `<p>${originalSnippet}</p>`,
+      featuredImage: parsed.featuredImage || crawlerFeaturedImage || null
     };
   } catch (e) {
     console.error("Editorial AI Agent Failed, falling back...", e);
-    // Generic high-quality backup
+    // Generic high-quality backup matching user requirements
+    let fallbackHtml = `<p>${originalSnippet || "Full details remain updated on the original news source official website."}</p>`;
+    if (articleUrl && sourceName) {
+      fallbackHtml += `
+      <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+      <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+        This news development was originally reported and published by our media partner <strong>${sourceName}</strong>. For original reporting, additional live broadcasts and more extensive updates, please check out the official coverage directly on <a href="${articleUrl}" target="_blank" rel="noopener noreferrer">${sourceName}</a>.
+      </p>`;
+    }
     return {
       title: `${originalTitle}`,
       summary: originalSnippet ? originalSnippet.substring(0, 150) + "..." : "Local news update from Nigerian top sources.",
       category: "National",
-      contentHtml: `<p>${originalSnippet || "Full news article detail remains updated on the major publication link."}</p>`
+      contentHtml: fallbackHtml,
+      featuredImage: null
     };
   }
 }
@@ -552,12 +801,13 @@ async function autoPublishFreshArticles() {
       addLog("info", `Processing Article: "${article.originalTitle}"`, "summarizer");
       
       // Step A: Trigger Editorial Agent
-      const aiEdit = await runAIElegancyAgent(article.originalTitle, article.content);
+      const aiEdit = await runAIElegancyAgent(article.originalTitle, article.content, article.url, article.source);
       
       article.title = aiEdit.title;
       article.summary = aiEdit.summary;
       article.category = aiEdit.category;
       article.content = aiEdit.contentHtml;
+      article.featuredImage = aiEdit.featuredImage;
       
       // Step B: Publish to WordPress
       addLog("info", `Publishing to WordPress [${config.wordpressMode.toUpperCase()}]: "${article.title}"`, "publisher");
@@ -566,7 +816,7 @@ async function autoPublishFreshArticles() {
       if (config.wordpressMode === "xmlrpc") {
         wpId = await wordpressPublishXmlRpc(config, article.title, article.content, article.category);
       } else {
-        wpId = await wordpressPublishRest(config, article.title, article.content, article.category);
+        wpId = await wordpressPublishRest(config, article.title, article.content, article.category, article.featuredImage);
       }
 
       article.wordpressId = wpId;
@@ -756,10 +1006,11 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
   try {
     // 1. Editorial Summarization if empty (Lazy summarizes via Gemini)
     if (!article.summary || article.summary === "") {
-      const aiEdit = await runAIElegancyAgent(article.title, article.content);
+      const aiEdit = await runAIElegancyAgent(article.title, article.content, article.url, article.source);
       article.summary = aiEdit.summary;
       article.category = aiEdit.category;
       article.content = aiEdit.contentHtml;
+      article.featuredImage = aiEdit.featuredImage;
     }
 
     addLog("info", `Force Publishing Article to WP: ${article.title}`, "publisher");
@@ -769,7 +1020,7 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     if (config.wordpressMode === "xmlrpc") {
       wpId = await wordpressPublishXmlRpc(config, article.title, article.content, article.category);
     } else {
-      wpId = await wordpressPublishRest(config, article.title, article.content, article.category);
+      wpId = await wordpressPublishRest(config, article.title, article.content, article.category, article.featuredImage);
     }
 
     article.wordpressId = wpId;
