@@ -14,6 +14,7 @@ export interface Article {
   whatsappSent: boolean;
   whatsappError: string | null;
   publishError: string | null;
+  featuredImage?: string | null;
 }
 
 export interface NewsSource {
