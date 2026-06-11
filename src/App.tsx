@@ -24,7 +24,8 @@ import {
   Grid,
   Bell,
   CheckCircle2,
-  Lock
+  Lock,
+  Sparkles
 } from "lucide-react";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./types.ts";
 
@@ -78,6 +79,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [editingArticle, setEditingArticle] = useState<Article | null>(null);
+  const [enriching, setEnriching] = useState(false);
   const [alert, setAlert] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [showManualForm, setShowManualForm] = useState(false);
 
@@ -323,6 +325,28 @@ export default function App() {
       }
     } catch (e) {
       triggerAlert("error", "API offline or error while validating approval.");
+    }
+  };
+
+  // AI Expand Details & Enrich with Custom Media assets
+  const handleAIEnrichArticle = async (id: string) => {
+    setEnriching(true);
+    triggerAlert("info", "AI is fetching full content and generating premium SEO story...");
+    try {
+      const res = await fetch(`/api/articles/${id}/enrich`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setEditingArticle(data.article);
+        triggerAlert("success", "AI Agent successfully created rich full-length article narrative!");
+        fetchData();
+      } else {
+        const data = await res.json();
+        triggerAlert("error", data.error || "Failed to enrich draft details.");
+      }
+    } catch (e) {
+      triggerAlert("error", "Network offline or error contacting enrichment service.");
+    } finally {
+      setEnriching(false);
     }
   };
 
@@ -778,6 +802,30 @@ export default function App() {
                             className="w-full text-sm bg-slate-900/60 text-slate-450 cursor-not-allowed border border-slate-800 rounded-xl px-3 py-2 focus:outline-none"
                           />
                         </div>
+                      </div>
+
+                      {/* Premium AI Editorial Enrichment CTA */}
+                      <div className="border border-emerald-900/30 bg-emerald-950/10 p-4 rounded-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <h4 className="text-sm font-semibold text-emerald-400 flex items-center gap-1.5">
+                            <Sparkles className="h-4 w-4 text-emerald-350" /> AI Editorial Enrichment
+                          </h4>
+                          <p className="text-xs text-slate-400 max-w-lg leading-relaxed">
+                            Research and transform this RSS snippet introduction into a comprehensive 4-paragraph full-length story with matching professional photos.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={enriching}
+                          onClick={() => handleAIEnrichArticle(editingArticle.id)}
+                          className={`w-full md:w-auto shrink-0 flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold transition-all ${
+                            enriching
+                              ? "bg-emerald-950 text-emerald-600 border border-emerald-900/40 cursor-wait animate-pulse"
+                              : "bg-gradient-to-r from-emerald-600 to-green-650 hover:from-emerald-500 hover:to-green-550 text-white shadow shadow-emerald-950/50 cursor-pointer"
+                          }`}
+                        >
+                          {enriching ? "Enriching Story..." : "AI Research & Write Full Article"}
+                        </button>
                       </div>
 
                       <div>
