@@ -106,50 +106,61 @@ export default function App() {
   // FETCH CORE DATA FROM BACKEND
   const fetchData = async () => {
     setLoading(true);
-    try {
-      const [artRes, srcRes, logRes, cfgRes, statRes] = await Promise.all([
-        fetch("/api/articles"),
-        fetch("/api/sources"),
-        fetch("/api/logs"),
-        fetch("/api/config"),
-        fetch("/api/stats")
-      ]);
+    let attempts = 3;
+    let success = false;
 
-      const fetchJson = async (res: Response) => {
-        if (!res.ok) return null;
-        const contentType = res.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-          throw new Error(`Returned HTML or non-JSON content type: ${contentType || "none"} (Status: ${res.status})`);
+    while (attempts > 0 && !success) {
+      try {
+        const [artRes, srcRes, logRes, cfgRes, statRes] = await Promise.all([
+          fetch("/api/articles"),
+          fetch("/api/sources"),
+          fetch("/api/logs"),
+          fetch("/api/config"),
+          fetch("/api/stats")
+        ]);
+
+        const fetchJson = async (res: Response) => {
+          if (!res.ok) return null;
+          const contentType = res.headers.get("content-type");
+          if (!contentType || !contentType.includes("application/json")) {
+            throw new Error(`Returned HTML or non-JSON content type: ${contentType || "none"} (Status: ${res.status})`);
+          }
+          return res.json();
+        };
+
+        if (artRes.ok) {
+          const data = await fetchJson(artRes);
+          if (data) setArticles(data);
         }
-        return res.json();
-      };
-
-      if (artRes.ok) {
-        const data = await fetchJson(artRes);
-        if (data) setArticles(data);
+        if (srcRes.ok) {
+          const data = await fetchJson(srcRes);
+          if (data) setSources(data);
+        }
+        if (logRes.ok) {
+          const data = await fetchJson(logRes);
+          if (data) setLogs(data);
+        }
+        if (cfgRes.ok) {
+          const data = await fetchJson(cfgRes);
+          if (data) setConfig(data);
+        }
+        if (statRes.ok) {
+          const data = await fetchJson(statRes);
+          if (data) setStats(data);
+        }
+        success = true;
+      } catch (e) {
+        attempts--;
+        console.warn(`Fetch attempt failed. Attempts remaining: ${attempts}`, e);
+        if (attempts > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        } else {
+          console.error("API Sourcing Fetch failure, connecting offline standard config...", e);
+          triggerAlert("error", "Failed to load up-to-date server stats. Verify backend connection.");
+        }
       }
-      if (srcRes.ok) {
-        const data = await fetchJson(srcRes);
-        if (data) setSources(data);
-      }
-      if (logRes.ok) {
-        const data = await fetchJson(logRes);
-        if (data) setLogs(data);
-      }
-      if (cfgRes.ok) {
-        const data = await fetchJson(cfgRes);
-        if (data) setConfig(data);
-      }
-      if (statRes.ok) {
-        const data = await fetchJson(statRes);
-        if (data) setStats(data);
-      }
-    } catch (e) {
-      console.error("API Sourcing Fetch failure, connecting offline standard config...", e);
-      triggerAlert("error", "Failed to load up-to-date server stats. Verify backend connection.");
-    } finally {
-      setLoading(false);
     }
+    setLoading(false);
   };
 
   // Trigger manual immediate scraping cycle
