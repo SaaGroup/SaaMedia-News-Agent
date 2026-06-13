@@ -15,13 +15,11 @@ const DB_PATH = path.join(process.cwd(), "db.json");
 
 // Define Default Values
 const DEFAULT_SOURCES: NewsSource[] = [
-  { id: "channelstv", name: "ChannelsTV", url: "https://www.channelstv.com", type: "General", feedUrl: "https://www.channelstv.com/feed/", enabled: true },
-  { id: "punchng", name: "PunchNG", url: "https://www.punchng.com", type: "National", feedUrl: "https://punchng.com/feed/", enabled: true },
-  { id: "tvcnews", name: "TVC News", url: "https://www.tvcnews.tv", type: "National", feedUrl: "https://tvcnews.tv/feed/", enabled: true },
-  { id: "dailytrust", name: "DailyTrust", url: "https://www.dailytrust.com", type: "Politics/Security", feedUrl: "https://dailytrust.com/feed/", enabled: true },
-  { id: "arisetv", name: "Arise TV", url: "https://www.arise.tv", type: "Business/Politics", feedUrl: "https://www.arise.tv/feed/", enabled: true },
-  { id: "nairametrics", name: "Nairametrics", url: "https://www.nairametrics.com", type: "Business", feedUrl: "https://nairametrics.com/feed/", enabled: true },
-  { id: "businessdayng", name: "BusinessDay NG", url: "https://www.businessday.ng", type: "Economy", feedUrl: "https://businessday.ng/feed/", enabled: true }
+  { id: "channelstv-politics", name: "ChannelsTV Politics", url: "https://www.channelstv.com/category/politics/", type: "Politics", feedUrl: "https://www.channelstv.com/category/politics/", enabled: true },
+  { id: "tvcnews-politics", name: "TVC News Politics", url: "https://www.tvcnews.tv/category/politics-news/", type: "Politics", feedUrl: "https://www.tvcnews.tv/category/politics-news/", enabled: true },
+  { id: "channelstv-business", name: "ChannelsTV Business", url: "https://www.channelstv.com/category/business/", type: "Business", feedUrl: "https://www.channelstv.com/category/business/", enabled: true },
+  { id: "dailytrust-news", name: "DailyTrust News", url: "https://dailytrust.com/topics/news/", type: "National", feedUrl: "https://dailytrust.com/topics/news/", enabled: true },
+  { id: "dailytrust-politics", name: "DailyTrust Politics", url: "https://dailytrust.com/topics/politics/", type: "Politics", feedUrl: "https://dailytrust.com/topics/politics/", enabled: true }
 ];
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -56,7 +54,24 @@ function loadDb() {
     const parsed = JSON.parse(data);
     // Backward compatibility check
     if (!parsed.articles) parsed.articles = [];
-    if (!parsed.sources) parsed.sources = DEFAULT_SOURCES;
+    if (!parsed.sources) {
+      parsed.sources = DEFAULT_SOURCES;
+    } else {
+      // Automatic migration: If the database contains old sources (e.g. punchng or arisetv or old feedUrl), replace with new category sources
+      const containsOldSources = parsed.sources.some((s: any) => 
+        s.id === "punchng" || 
+        s.id === "arisetv" || 
+        s.id === "nairametrics" || 
+        s.id === "businessdayng" || 
+        (s.feedUrl && s.feedUrl.includes("punchng")) ||
+        (s.feedUrl && s.feedUrl.includes("nairametrics")) ||
+        (s.feedUrl && s.feedUrl === "https://www.channelstv.com/feed/")
+      );
+      if (containsOldSources || parsed.sources.length !== DEFAULT_SOURCES.length) {
+        parsed.sources = DEFAULT_SOURCES;
+        fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2));
+      }
+    }
     if (!parsed.config) parsed.config = DEFAULT_CONFIG;
     if (!parsed.logs) parsed.logs = [];
     return parsed;
@@ -587,9 +602,10 @@ INSTRUCTIONS:
 1. Write a Captivating, SEO-Optimized Title (polished, professional, customized for high engagement).
 2. Write a Professional Short Summary (1-2 sentences) of the core development.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
-4. Write a highly detailed, comprehensive full-length news story (at least 3-5 rich narrative paragraphs, featuring detailed context, numbers, quotes, and background) formatted in HTML.
+4. Write a highly thorough, complete full-length news story, incorporating EVERY SINGLE available paragraph and detail of the crawled word-for-word webpage content. Do NOT summarize away or truncate vital information; instead, preserve the full depth of the report (including all descriptions, timelines, numbers, direct quotes, and policy background).
+   - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
-   - You MUST embed a beautiful featured image at the VERY top of the article contentHtml.
+   - You MUST embed the elected Featured Image at the absolute top of the article contentHtml.
    - If the original article crawled images list is empty, or only contains unusable URLs, you MUST select one of these highly relevant high-resolution photo URLs based on your category:
      * Politics / National Policy:
        https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?q=80&w=1000&auto=format&fit=crop
@@ -608,16 +624,12 @@ INSTRUCTIONS:
      Embed the elected featured image beautifully like:
      <p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="SELECTED_FEATURED_IMAGE" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>
      
-     - Contexually embed at least 1 secondary supporting image from the choices inside the article itself between paragraphs to enrich reading visual structures:
+     - You MUST contextually loop and embed ALL secondary supporting images (from the Crawled Media Assets list) sequentially inside the news story between paragraphs to enrich the visual structure of the article:
      <p align="center" style="margin: 25px 0;"><img class="aligncenter" src="SECONDARY_IMAGE_URL" alt="News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>
      
      - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
      
-   - At the absolute bottom of the contentHtml, append a professional, elegant Source Credit Block following verbatim this HTML styling structure:
-     <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-     <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-       This news development was originally reported by our media partner <a href="${articleUrl || "#"}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName || "General Press"} </a>.
-     </p>
+   - Do NOT append any news source partner credits, back links, reference footers, or footnote/citation blocks at the bottom of the article. Focus entirely on the human-like editorial storytelling text.
 
 5. Decide which URL represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
 
@@ -691,13 +703,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       fallbackHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawlerFeaturedImage}" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + fallbackHtml;
     }
 
-    if (articleUrl && sourceName) {
-      fallbackHtml += `
-      <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-      <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-        This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
-      </p>`;
-    }
+
     return {
       title: `${originalTitle}`,
       summary: originalSnippet ? originalSnippet.substring(0, 150) + "..." : "Local news update from Nigerian top sources.",
@@ -767,41 +773,129 @@ Generate exactly 3 articles. Respond strictly in valid JSON matching this schema
 
 // MAIN AUTOMATED RUNNER
 async function scrapeAndAutoProcess() {
-  addLog("info", "Starting News Sourcing Pipeline across active sites...", "scraper");
+  addLog("info", "Starting News Sourcing Pipeline across active category channels...", "scraper");
   const db = loadDb();
   const config = db.config;
   let newArticlesFoundCount = 0;
 
   for (const source of db.sources) {
     if (!source.enabled) continue;
-    addLog("info", `Sourcing news from ${source.name} via ${source.feedUrl}`, "scraper");
 
     let feeds: any[] = [];
-    try {
-      // 1. Try real fetch
-      const response = await fetch(source.feedUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/xml, application/xml"
-        },
-        signal: AbortSignal.timeout(6000) // 6 seconds timeout
-      });
+    let fetchUrl = source.feedUrl;
 
-      if (response.ok) {
-        const text = await response.text();
-        feeds = parseRssXml(text);
-        addLog("success", `Scraped ${feeds.length} items from ${source.name} live feed.`, "scraper");
-      } else {
-        throw new Error(`HTTP Status ${response.status}`);
+    // Normalizing category URLs to append WordPress RSS feeds
+    if (!fetchUrl.endsWith("/feed/") && !fetchUrl.endsWith("/feed") && !fetchUrl.endsWith(".xml")) {
+      fetchUrl = fetchUrl.endsWith("/") ? `${fetchUrl}feed/` : `${fetchUrl}/feed/`;
+    }
+
+    addLog("info", `Sourcing news from ${source.name} via ${fetchUrl}`, "scraper");
+
+    try {
+      let parsedSuccess = false;
+
+      // 1. Try real XML/feed fetch
+      try {
+        const response = await fetch(fetchUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/xml, application/xml, text/html"
+          },
+          signal: AbortSignal.timeout(8000) // 8 seconds timeout
+        });
+
+        if (response.ok) {
+          const text = await response.text();
+          if (text.includes("<item>") || text.includes("<feed>") || text.includes("<channel>")) {
+            feeds = parseRssXml(text);
+            if (feeds.length > 0) {
+              addLog("success", `Scraped ${feeds.length} items from ${source.name} live XML feed.`, "scraper");
+              parsedSuccess = true;
+            }
+          }
+        }
+      } catch (xmlErr: any) {
+        addLog("info", `XML Feed fetch failed for ${source.name}: ${xmlErr.message}`, "scraper");
+      }
+
+      // 2. Fallback to HTML Scraper on the original category webpage
+      if (!parsedSuccess) {
+        addLog("info", `XML Parse was empty. Attempting HTML category scraper fallback on original link: ${source.feedUrl}...`, "scraper");
+        const htmlResponse = await fetch(source.feedUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html"
+          },
+          signal: AbortSignal.timeout(8000)
+        });
+
+        if (htmlResponse.ok) {
+          const htmlText = await htmlResponse.text();
+          const scrapedItems: any[] = [];
+          
+          // Regex scan for <a href="LINK">TITLE</a>
+          const linkRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+          let linkMatch;
+          while ((linkMatch = linkRegex.exec(htmlText)) !== null) {
+            const href = linkMatch[1].trim();
+            const innerHtml = linkMatch[2];
+            
+            // Skip non-article URLs (e.g. author pages, category grids, tags, feed links, graphics/assets)
+            if (!href.startsWith("http") || 
+                href.includes("/category/") || 
+                href.includes("/tag/") || 
+                href.includes("/author/") || 
+                href.endsWith(".png") || 
+                href.endsWith(".jpg") || 
+                href.endsWith(".css") || 
+                href.endsWith(".js") || 
+                href.includes("/feed") || 
+                href === source.url || 
+                href === source.feedUrl) {
+              continue;
+            }
+            
+            const pathSegments = href.split("/").filter(Boolean);
+            if (pathSegments.length < 3) {
+              continue; // Too short to be a valid news article post url
+            }
+            
+            let title = innerHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+            if (title.length > 15 && title.length < 200 && 
+                !title.toLowerCase().includes("read more") && 
+                !title.toLowerCase().includes("comment") && 
+                !title.toLowerCase().includes("share") &&
+                !title.toLowerCase().includes("<img")) {
+              
+              if (!scrapedItems.some(l => l.link === href)) {
+                scrapedItems.push({
+                  title: decodeXml(title),
+                  link: href,
+                  description: `${source.name} category update. Open article for detailed news content.`,
+                  pubDate: new Date().toISOString()
+                });
+              }
+            }
+          }
+
+          if (scrapedItems.length > 0) {
+            feeds = scrapedItems.slice(0, 15);
+            addLog("success", `HTML Category Scraper extracted ${feeds.length} live articles from HTML page catalog of ${source.name}!`, "scraper");
+            parsedSuccess = true;
+          }
+        }
+      }
+
+      if (!parsedSuccess) {
+        throw new Error("Both direct category feed URL fetch and HTML catalog card extraction returned 0 items");
       }
     } catch (err: any) {
-      addLog("warn", `Live Feed Scraping of ${source.name} failed (${err.message}). Triggering AI Sourcing Agent fallback...`, "scraper");
-      // 2. Fallback to Gemini generator so our demo dashboard is ALWAYS extremely real and vibrant!
+      addLog("warn", `Live Scraping of ${source.name} failed (${err.message}). Triggering AI Sourcing Agent fallback...`, "scraper");
       feeds = await runAIAlternateScraper(source.name, source.type);
       addLog("success", `AI Sourcing Agent successfully recovered ${feeds.length} trending items for ${source.name}`, "scraper");
     }
 
-    // Check database to see if we already possess these URLs (to enforce skipping duplicate scrapes!)
+    // Check database to see if we already possess these URLs to enforce duplicate avoidance
     for (const item of feeds) {
       const alreadyExists = db.articles.some((a: Article) => a.url === item.link);
       if (alreadyExists) {
@@ -812,12 +906,12 @@ async function scrapeAndAutoProcess() {
       
       let finalTitle = item.title;
       let finalSummary = "";
-      let finalCategory = "National";
+      let finalCategory = source.type || "National";
       let finalContent = item.description || "";
       let finalFeaturedImage = null;
       let isEnriched = false;
 
-      // Limit background AI writing to first 12 articles to respect API rate limits/costs, but ALWAYS crawl full content!
+      // Limit background AI writing to first 12 articles, but ALWAYS fetch full page content!
       if (newArticlesFoundCount < 12) {
         try {
           addLog("info", `Crawl-research & AI rich writing triggered for "${item.title}"`, "scraper");
@@ -828,7 +922,7 @@ async function scrapeAndAutoProcess() {
           finalContent = aiEdit.contentHtml;
           finalFeaturedImage = aiEdit.featuredImage;
           isEnriched = true;
-          addLog("success", `AI successfully created full-length article: "${finalTitle}"`, "scraper");
+          addLog("success", `AI successfully created full-length article preserving original details: "${finalTitle}"`, "scraper");
         } catch (err: any) {
           addLog("warn", `Could not auto-enrich with AI: ${err.message}. Fetching full page and saving raw full content instead.`, "scraper");
           // Fallback to directly crawling full webpage content as raw draft
@@ -839,16 +933,22 @@ async function scrapeAndAutoProcess() {
               if (paragraphs.length <= 1) {
                 paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
               }
-              let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${p}</p>`).join("\n");
+              let draftHtml = "";
+              paragraphs.forEach((p, idx) => {
+                draftHtml += `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>\n`;
+                if (idx > 0 && idx % 2 === 0 && crawl.imageUrls.length > 0) {
+                  const imgIdx = (Math.floor(idx / 2)) % crawl.imageUrls.length;
+                  const inlineImg = crawl.imageUrls[imgIdx];
+                  if (inlineImg && inlineImg !== crawl.featuredImage) {
+                    draftHtml += `<p align="center" style="margin: 25px 0;"><img class="aligncenter" src="${inlineImg}" alt="Inline News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>\n`;
+                  }
+                }
+              });
+
               if (crawl.featuredImage) {
                 draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
                 finalFeaturedImage = crawl.featuredImage;
               }
-              draftHtml += `
-              <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-              <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-                This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
-              </p>`;
               finalContent = draftHtml;
               finalSummary = crawl.fullText.substring(0, 150) + "...";
             }
@@ -865,16 +965,22 @@ async function scrapeAndAutoProcess() {
             if (paragraphs.length <= 1) {
               paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
             }
-            let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${p}</p>`).join("\n");
+            let draftHtml = "";
+            paragraphs.forEach((p, idx) => {
+              draftHtml += `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>\n`;
+              if (idx > 0 && idx % 2 === 0 && crawl.imageUrls.length > 0) {
+                const imgIdx = (Math.floor(idx / 2)) % crawl.imageUrls.length;
+                const inlineImg = crawl.imageUrls[imgIdx];
+                if (inlineImg && inlineImg !== crawl.featuredImage) {
+                  draftHtml += `<p align="center" style="margin: 25px 0;"><img class="aligncenter" src="${inlineImg}" alt="Inline News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>\n`;
+                }
+              }
+            });
+
             if (crawl.featuredImage) {
               draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
               finalFeaturedImage = crawl.featuredImage;
             }
-            draftHtml += `
-            <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-            <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-              This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
-            </p>`;
             finalContent = draftHtml;
             finalSummary = crawl.fullText.substring(0, 150) + "...";
           }
