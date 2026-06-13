@@ -548,15 +548,15 @@ async function runAIElegancyAgent(
   contentHtml: string;
   featuredImage: string | null;
 }> {
+  let textToAnalyze = originalSnippet;
+  let imagesFound: string[] = [];
+  let crawlerFeaturedImage: string | null = null;
+
   try {
     const ai = await getGeminiClient();
     addLog("info", `Editorial Agent research triggered for "${originalTitle}"`, "summarizer");
     
     // Fetch full webpage context first
-    let textToAnalyze = originalSnippet;
-    let imagesFound: string[] = [];
-    let crawlerFeaturedImage: string | null = null;
-
     if (articleUrl && sourceName) {
       const crawl = await fetchFullPageAndImages(articleUrl, sourceName);
       if (crawl.fullText) {
@@ -616,7 +616,7 @@ INSTRUCTIONS:
    - At the absolute bottom of the contentHtml, append a professional, elegant Source Credit Block following verbatim this HTML styling structure:
      <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
      <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-       This news development was originally reported by our media partner <a href="${articleUrl || "#"}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName || "General Press"} - ${articleUrl || "#"}</a>.
+       This news development was originally reported by our media partner <a href="${articleUrl || "#"}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName || "General Press"} </a>.
      </p>
 
 5. Decide which URL represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
@@ -677,13 +677,25 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
   } catch (e: any) {
     addLog("error", `Editorial AI Agent failed: ${e.message}. Using high-quality backup layout.`, "summarizer");
     console.error("Editorial AI Agent Failed, falling back...", e);
-    // Generic high-quality backup matching user requirements
-    let fallbackHtml = `<p>${originalSnippet || "Full details remain updated on the original news source official website."}</p>`;
+    // Generic high-quality backup matching user requirements using full webpage crawled text!
+    let paragraphs = textToAnalyze.split("\n\n").map(p => p.trim()).filter(Boolean);
+    if (paragraphs.length <= 1) {
+      paragraphs = textToAnalyze.split("\n").map(p => p.trim()).filter(Boolean);
+    }
+    let fallbackHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${p}</p>`).join("\n");
+    if (!fallbackHtml || fallbackHtml.trim() === "" || fallbackHtml.trim() === "<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'></p>") {
+      fallbackHtml = `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${originalSnippet}</p>`;
+    }
+
+    if (crawlerFeaturedImage) {
+      fallbackHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawlerFeaturedImage}" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + fallbackHtml;
+    }
+
     if (articleUrl && sourceName) {
       fallbackHtml += `
       <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
       <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-        This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} - ${articleUrl}</a>.
+        This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
       </p>`;
     }
     return {
@@ -691,7 +703,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       summary: originalSnippet ? originalSnippet.substring(0, 150) + "..." : "Local news update from Nigerian top sources.",
       category: "National",
       contentHtml: fallbackHtml,
-      featuredImage: "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
+      featuredImage: crawlerFeaturedImage || "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
     };
   }
 }
@@ -796,23 +808,100 @@ async function scrapeAndAutoProcess() {
         continue;
       }
 
+      addLog("info", `Fresh article discovered: "${item.title}". Fetching full webpage content...`, "scraper");
+      
+      let finalTitle = item.title;
+      let finalSummary = "";
+      let finalCategory = "National";
+      let finalContent = item.description || "";
+      let finalFeaturedImage = null;
+      let isEnriched = false;
+
+      // Limit background AI writing to first 12 articles to respect API rate limits/costs, but ALWAYS crawl full content!
+      if (newArticlesFoundCount < 12) {
+        try {
+          addLog("info", `Crawl-research & AI rich writing triggered for "${item.title}"`, "scraper");
+          const aiEdit = await runAIElegancyAgent(item.title, item.description, item.link, source.name);
+          finalTitle = aiEdit.title;
+          finalSummary = aiEdit.summary;
+          finalCategory = aiEdit.category;
+          finalContent = aiEdit.contentHtml;
+          finalFeaturedImage = aiEdit.featuredImage;
+          isEnriched = true;
+          addLog("success", `AI successfully created full-length article: "${finalTitle}"`, "scraper");
+        } catch (err: any) {
+          addLog("warn", `Could not auto-enrich with AI: ${err.message}. Fetching full page and saving raw full content instead.`, "scraper");
+          // Fallback to directly crawling full webpage content as raw draft
+          try {
+            const crawl = await fetchFullPageAndImages(item.link, source.name);
+            if (crawl.fullText) {
+              let paragraphs = crawl.fullText.split("\n\n").map(p => p.trim()).filter(Boolean);
+              if (paragraphs.length <= 1) {
+                paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
+              }
+              let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${p}</p>`).join("\n");
+              if (crawl.featuredImage) {
+                draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
+                finalFeaturedImage = crawl.featuredImage;
+              }
+              draftHtml += `
+              <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+              <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+                This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+              </p>`;
+              finalContent = draftHtml;
+              finalSummary = crawl.fullText.substring(0, 150) + "...";
+            }
+          } catch (crawlErr) {
+            // Keep default item.description
+          }
+        }
+      } else {
+        addLog("info", `Queue threshold exceeded, but loading full webpage content for manual review draft...`, "scraper");
+        try {
+          const crawl = await fetchFullPageAndImages(item.link, source.name);
+          if (crawl.fullText) {
+            let paragraphs = crawl.fullText.split("\n\n").map(p => p.trim()).filter(Boolean);
+            if (paragraphs.length <= 1) {
+              paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
+            }
+            let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${p}</p>`).join("\n");
+            if (crawl.featuredImage) {
+              draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
+              finalFeaturedImage = crawl.featuredImage;
+            }
+            draftHtml += `
+            <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+            <p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+              This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+            </p>`;
+            finalContent = draftHtml;
+            finalSummary = crawl.fullText.substring(0, 150) + "...";
+          }
+        } catch (crawlErr) {
+          // Keep default item.description
+        }
+      }
+
       // We found a completely fresh article! Combine items
       const newArt: Article = {
         id: Math.random().toString(36).substring(2, 9),
-        title: item.title,
+        title: finalTitle,
         originalTitle: item.title,
         url: item.link,
         source: source.name,
         scrapedAt: new Date().toISOString(),
-        content: item.description,
-        summary: "",
-        category: "National",
+        content: finalContent,
+        summary: finalSummary || (item.description ? item.description.substring(0, 150) + "..." : "Local news update from Nigerian top sources."),
+        category: finalCategory,
         status: "scraped",
         wordpressId: null,
         publishedAt: null,
         whatsappSent: false,
         whatsappError: null,
-        publishError: null
+        publishError: null,
+        featuredImage: finalFeaturedImage,
+        isEnriched: isEnriched
       };
 
       db.articles.push(newArt);
@@ -1158,39 +1247,55 @@ app.delete("/api/articles/:id", (req, res) => {
 
 // Stats aggregator endpoint
 app.get("/api/stats", (req, res) => {
-  const db = loadDb();
-  const articles: Article[] = db.articles;
-  const sources: NewsSource[] = db.sources;
+  try {
+    const db = loadDb();
+    const articles: Article[] = db.articles || [];
+    const sources: NewsSource[] = db.sources || [];
 
-  const totalScraped = articles.length;
-  const totalPublished = articles.filter(a => a.status === "published").length;
-  const totalPending = articles.filter(a => a.status === "scraped" || a.status === "approved").length;
-  const totalFailed = articles.filter(a => a.status === "failed").length;
+    const totalScraped = articles.length;
+    const totalPublished = articles.filter(a => a && a.status === "published").length;
+    const totalPending = articles.filter(a => a && (a.status === "scraped" || a.status === "approved")).length;
+    const totalFailed = articles.filter(a => a && a.status === "failed").length;
 
-  const categoryCounts: Record<string, number> = {};
-  articles.forEach(a => {
-    categoryCounts[a.category] = (categoryCounts[a.category] || 0) + 1;
-  });
+    const categoryCounts: Record<string, number> = {};
+    articles.forEach(a => {
+      if (a) {
+        const cat = a.category || "National";
+        categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+      }
+    });
 
-  const sourceCounts: Record<string, number> = {};
-  articles.forEach(a => {
-    sourceCounts[a.source] = (sourceCounts[a.source] || 0) + 1;
-  });
+    const sourceCounts: Record<string, number> = {};
+    articles.forEach(a => {
+      if (a) {
+        const src = a.source || "General Press";
+        sourceCounts[src] = (sourceCounts[src] || 0) + 1;
+      }
+    });
 
-  res.json({
-    totalScraped,
-    totalPublished,
-    totalPending,
-    totalFailed,
-    categoryCounts,
-    sourceCounts,
-    schedulerEnabled: db.config.schedulerEnabled,
-    schedulerIntervalMins: db.config.schedulerIntervalMins
-  });
+    res.json({
+      totalScraped,
+      totalPublished,
+      totalPending,
+      totalFailed,
+      categoryCounts,
+      sourceCounts,
+      schedulerEnabled: !!(db.config && db.config.schedulerEnabled),
+      schedulerIntervalMins: db.config ? db.config.schedulerIntervalMins : 60
+    });
+  } catch (err: any) {
+    console.error("Error in stats aggregation:", err);
+    res.status(500).json({ error: "Failed to compile stats metrics safely", details: err.message });
+  }
 });
 
 // Vite & Static file handler config
 async function startServer() {
+  // Bind the port immediately so connections are accepted immediately to prevent startup connection timeout failures
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`SaaMedia News Automation Node server is actively listening on http://localhost:${PORT}`);
+  });
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -1205,10 +1310,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`SaaMedia News Automation Node server is actively listening on http://localhost:${PORT}`);
-  });
 }
 
 startServer();
