@@ -103,64 +103,70 @@ export default function App() {
     }, 4500);
   };
 
-  // FETCH CORE DATA FROM BACKEND
-  const fetchData = async () => {
+  // FETCH CORE DATA FROM BACKEND RELIABLY
+  const fetchData = async (isBackground = false) => {
     setLoading(true);
-    let attempts = 3;
-    let success = false;
-
-    while (attempts > 0 && !success) {
+    
+    const fetchWithTimeout = async (url: string, timeout = 8000) => {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeout);
       try {
-        const [artRes, srcRes, logRes, cfgRes, statRes] = await Promise.all([
-          fetch("/api/articles"),
-          fetch("/api/sources"),
-          fetch("/api/logs"),
-          fetch("/api/config"),
-          fetch("/api/stats")
-        ]);
-
-        const fetchJson = async (res: Response) => {
-          if (!res.ok) return null;
-          const contentType = res.headers.get("content-type");
-          if (!contentType || !contentType.includes("application/json")) {
-            throw new Error(`Returned HTML or non-JSON content type: ${contentType || "none"} (Status: ${res.status})`);
-          }
-          return res.json();
-        };
-
-        if (artRes.ok) {
-          const data = await fetchJson(artRes);
-          if (data) setArticles(data);
-        }
-        if (srcRes.ok) {
-          const data = await fetchJson(srcRes);
-          if (data) setSources(data);
-        }
-        if (logRes.ok) {
-          const data = await fetchJson(logRes);
-          if (data) setLogs(data);
-        }
-        if (cfgRes.ok) {
-          const data = await fetchJson(cfgRes);
-          if (data) setConfig(data);
-        }
-        if (statRes.ok) {
-          const data = await fetchJson(statRes);
-          if (data) setStats(data);
-        }
-        success = true;
-      } catch (e) {
-        attempts--;
-        console.warn(`Fetch attempt failed. Attempts remaining: ${attempts}`, e);
-        if (attempts > 0) {
-          await new Promise(resolve => setTimeout(resolve, 1500));
-        } else {
-          console.error("API Sourcing Fetch failure, connecting offline standard config...", e);
-          triggerAlert("error", "Failed to load up-to-date server stats. Verify backend connection.");
-        }
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(id);
+        return response;
+      } catch (err) {
+        clearTimeout(id);
+        throw err;
       }
+    };
+
+    const fetchJson = async (url: string) => {
+      try {
+        const res = await fetchWithTimeout(url);
+        if (!res.ok) {
+          console.warn(`Endpoint ${url} responded with status: ${res.status}`);
+          return null;
+        }
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          console.warn(`Endpoint ${url} returned non-JSON content type: ${contentType}`);
+          return null;
+        }
+        return await res.json();
+      } catch (e: any) {
+        console.warn(`Failed to fetch ${url}: ${e.message}`);
+        return null;
+      }
+    };
+
+    try {
+      // Fetch resources concurrently but handle individual failures gracefully so a single slow or offline endpoint doesn't crash everything
+      const [artData, srcData, logData, cfgData, statData] = await Promise.all([
+        fetchJson("/api/articles"),
+        fetchJson("/api/sources"),
+        fetchJson("/api/logs"),
+        fetchJson("/api/config"),
+        fetchJson("/api/stats")
+      ]);
+
+      if (artData) setArticles(artData);
+      if (srcData) setSources(srcData);
+      if (logData) setLogs(logData);
+      if (cfgData) setConfig(cfgData);
+      if (statData) setStats(statData);
+
+      // If absolutely everything failed, notify about backend offline state (unless background poll)
+      if (!artData && !srcData && !logData && !cfgData && !statData) {
+        if (!isBackground) {
+          triggerAlert("error", "SaaMedia News automation backend appears offline. Re-establishing connection...");
+        }
+        console.error("API Sourcing Fetch failure, connecting offline standard config...");
+      }
+    } catch (e) {
+      console.error("Critical error in fetchData queue orchestration:", e);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // Trigger manual immediate scraping cycle
@@ -400,8 +406,8 @@ export default function App() {
 
   // Fetch immediately on mount and poll stats every 15 secs
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 15000);
+    fetchData(false);
+    const interval = setInterval(() => fetchData(true), 15000);
     return () => clearInterval(interval);
   }, []);
 
