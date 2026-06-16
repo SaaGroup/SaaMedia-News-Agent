@@ -522,6 +522,7 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
 
     const targetHtml = articleHtml || bodyHtml;
     let cleanText = targetHtml
+      .replace(/<\/p>/gi, "\n\n")
       .replace(/<p[^>]*>/gi, "\n\n")
       .replace(/<br\s*\/?>/gi, "\n")
       .replace(/<[^>]*>/g, " ")
@@ -530,7 +531,11 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       .replace(/&lt;/g, "<")
       .replace(/&gt;/g, ">")
       .replace(/&quot;/g, '"')
-      .replace(/\s+/g, " ")
+      .replace(/[ \t]+/g, " ")
+      .split(/\n+/)
+      .map(line => line.trim())
+      .filter(line => line.length > 0)
+      .join("\n\n")
       .trim();
 
     if (cleanText.length > 10000) {
@@ -602,7 +607,7 @@ INSTRUCTIONS:
 1. Write a Captivating, SEO-Optimized Title (polished, professional, customized for high engagement).
 2. Write a Professional Short Summary (1-2 sentences) of the core development.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
-4. Write a highly thorough, complete full-length news story, incorporating EVERY SINGLE available paragraph and detail of the crawled word-for-word webpage content. Do NOT summarize away or truncate vital information; instead, preserve the full depth of the report (including all descriptions, timelines, numbers, direct quotes, and policy background).
+4. Write a highly thorough, complete full-length news story, preserving the EXACT original separation of paragraphs in the crawled webpage. Each individual paragraph in the input text MUST be written as its own separate HTML paragraph (using a separate <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'> tag). Do NOT combine, merge, or condense multiple paragraphs into one giant block; instead, articulate and arrange them sequentially matching the natural flow of the news source report. Include every possible detail (descriptions, data, quotes, and timelines).
    - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
    - You MUST embed the elected Featured Image at the absolute top of the article contentHtml.
@@ -679,11 +684,20 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
     const parsed = JSON.parse(bodyText);
     addLog("success", `Editorial AI Agent generated article successfully. Title: ${parsed.title}, Category: ${parsed.category}`, "summarizer");
     
+    let finalContentHtml = parsed.contentHtml || `<p>${originalSnippet}</p>`;
+    if (articleUrl && sourceName && !finalContentHtml.includes("originally reported by") && !finalContentHtml.includes("media partner")) {
+      finalContentHtml += `
+<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+  This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
+</p>`;
+    }
+
     return {
       title: parsed.title || originalTitle,
       summary: parsed.summary || originalSnippet.substring(0, 150),
       category: parsed.category || "National",
-      contentHtml: parsed.contentHtml || `<p>${originalSnippet}</p>`,
+      contentHtml: finalContentHtml,
       featuredImage: parsed.featuredImage || crawlerFeaturedImage || "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
     };
   } catch (e: any) {
@@ -694,15 +708,22 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
     if (paragraphs.length <= 1) {
       paragraphs = textToAnalyze.split("\n").map(p => p.trim()).filter(Boolean);
     }
-    let fallbackHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${p}</p>`).join("\n");
-    if (!fallbackHtml || fallbackHtml.trim() === "" || fallbackHtml.trim() === "<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'></p>") {
-      fallbackHtml = `<p style='margin-bottom: 20px; line-height: 1.7; color: #334155; font-size: 15px;'>${originalSnippet}</p>`;
+    let fallbackHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
+    if (!fallbackHtml || fallbackHtml.trim() === "" || fallbackHtml.trim() === "<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'></p>") {
+      fallbackHtml = `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${originalSnippet}</p>`;
     }
 
     if (crawlerFeaturedImage) {
       fallbackHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawlerFeaturedImage}" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + fallbackHtml;
     }
 
+    if (articleUrl && sourceName && !fallbackHtml.includes("originally reported by") && !fallbackHtml.includes("media partner")) {
+      fallbackHtml += `
+<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+  This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
+</p>`;
+    }
 
     return {
       title: `${originalTitle}`,
@@ -949,6 +970,13 @@ async function scrapeAndAutoProcess() {
                 draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
                 finalFeaturedImage = crawl.featuredImage;
               }
+              if (item.link && source.name) {
+                draftHtml += `
+<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+  This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+</p>`;
+              }
               finalContent = draftHtml;
               finalSummary = crawl.fullText.substring(0, 150) + "...";
             }
@@ -980,6 +1008,13 @@ async function scrapeAndAutoProcess() {
             if (crawl.featuredImage) {
               draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
               finalFeaturedImage = crawl.featuredImage;
+            }
+            if (item.link && source.name) {
+              draftHtml += `
+<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
+<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
+  This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+</p>`;
             }
             finalContent = draftHtml;
             finalSummary = crawl.fullText.substring(0, 150) + "...";
