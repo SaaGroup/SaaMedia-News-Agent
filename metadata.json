@@ -1,0 +1,6 @@
+{
+  "name": "SaaMedia News Agent",
+  "description": "Multi-AI agent Nigerian news automation platform to scrape, summarize, categorize, and auto-publish news to saamedia.com.ng with WhatsApp notifications.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
