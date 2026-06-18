@@ -42,7 +42,7 @@ export interface SystemConfig {
   wordpressPassword: string;
   wordpressMode: 'xmlrpc' | 'rest';
   whatsappRecipient: string;
-  whatsappGateway: 'twilio' | 'custom_webhook' | 'mock';
+  whatsappGateway: 'twilio' | 'custom_webhook' | 'mock' | 'whatsapp-web';
   whatsappSenderNumber: string;
   whatsappAccountSid: string;
   whatsappApiKey: string;
