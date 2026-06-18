@@ -4,11 +4,100 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
+import pkg from "whatsapp-web.js";
+const { Client, LocalAuth } = pkg;
+import QRCode from "qrcode";
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
+
+// WhatsApp Web Client Global State
+let whatsappClient: any = null;
+let whatsappClientStatus: "DISCONNECTED" | "AUTHENTICATING" | "QR_RECEIVED" | "CONNECTED" | "ERROR" = "DISCONNECTED";
+let whatsappQrCodeDataUrl: string | null = null;
+let whatsappConnectionError: string | null = null;
+
+async function initializeWhatsAppWebClient() {
+  if (whatsappClient) {
+    addLog("info", "WhatsApp Web client is already initialized. Skipping.", "whatsapp");
+    return;
+  }
+
+  addLog("info", "Initializing WhatsApp Web client (whatsapp-web.js) in headless mode...", "whatsapp");
+  whatsappClientStatus = "AUTHENTICATING";
+  whatsappQrCodeDataUrl = null;
+  whatsappConnectionError = null;
+
+  try {
+    whatsappClient = new Client({
+      authStrategy: new LocalAuth({
+        dataPath: path.join(process.cwd(), ".wwebjs_auth")
+      }),
+      puppeteer: {
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--no-zygote",
+          "--disable-gpu"
+        ]
+      }
+    });
+
+    whatsappClient.on("qr", async (qr: string) => {
+      whatsappClientStatus = "QR_RECEIVED";
+      addLog("info", `WhatsApp Web QR Code generated. Size: ${qr.length}`, "whatsapp");
+      try {
+        const dataUrl = await QRCode.toDataURL(qr);
+        whatsappQrCodeDataUrl = dataUrl;
+      } catch (err: any) {
+        addLog("error", `Failed to generate QR Code Data URL: ${err.message}`, "whatsapp");
+      }
+    });
+
+    whatsappClient.on("ready", () => {
+      whatsappClientStatus = "CONNECTED";
+      whatsappQrCodeDataUrl = null;
+      addLog("success", "WhatsApp Web client successfully authenticated and CONNECTED!", "whatsapp");
+    });
+
+    whatsappClient.on("authenticated", () => {
+      addLog("info", "WhatsApp Web client successfully authenticated.", "whatsapp");
+    });
+
+    whatsappClient.on("auth_failure", (msg: string) => {
+      whatsappClientStatus = "ERROR";
+      whatsappQrCodeDataUrl = null;
+      whatsappConnectionError = msg;
+      addLog("error", `WhatsApp Web authentication failed: ${msg}`, "whatsapp");
+    });
+
+    whatsappClient.on("disconnected", (reason: string) => {
+      whatsappClientStatus = "DISCONNECTED";
+      whatsappQrCodeDataUrl = null;
+      addLog("warn", `WhatsApp Web client disconnected. Reason: ${reason}`, "whatsapp");
+      whatsappClient = null;
+    });
+
+    whatsappClient.initialize().catch((err: any) => {
+      whatsappClientStatus = "ERROR";
+      whatsappConnectionError = err.message;
+      addLog("error", `WhatsApp Web client failed to initialize: ${err.message}`, "whatsapp");
+      whatsappClient = null;
+    });
+
+  } catch (err: any) {
+    whatsappClientStatus = "ERROR";
+    whatsappConnectionError = err.message;
+    addLog("error", `WhatsApp Web builder initialization failed: ${err.message}`, "whatsapp");
+    whatsappClient = null;
+  }
+}
 
 // DB File Definition
 const DB_PATH = path.join(process.cwd(), "db.json");
@@ -345,6 +434,34 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
       throw new Error(`Custom Webhook returned Status ${res.status}`);
     }
     return true;
+  }
+
+  if (config.whatsappGateway === "whatsapp-web") {
+    if (!whatsappClient) {
+      initializeWhatsAppWebClient();
+      throw new Error("WhatsApp Web client is booting. Please wait a few seconds and scan the QR code.");
+    }
+    if (whatsappClientStatus !== "CONNECTED") {
+      throw new Error(`WhatsApp Web client is not connected (Current status: ${whatsappClientStatus}). Please verify connection using QR code.`);
+    }
+
+    try {
+      let recipientId = config.whatsappRecipient.trim().replace(/\+/g, "");
+      if (!recipientId.endsWith("@c.us") && !recipientId.endsWith("@g.us")) {
+        if (recipientId.includes("-") || recipientId.length > 15) {
+          recipientId = `${recipientId}@g.us`;
+        } else {
+          recipientId = `${recipientId}@c.us`;
+        }
+      }
+
+      addLog("info", `Sending WhatsApp Web Alert to chat: ${recipientId}`, "whatsapp");
+      await whatsappClient.sendMessage(recipientId, body);
+      return true;
+    } catch (err: any) {
+      addLog("error", `WhatsApp Web Send Error: ${err.message}`, "whatsapp");
+      throw new Error(`WhatsApp Web Delivery Failed: ${err.message}`);
+    }
   }
 
   return false;
@@ -1102,7 +1219,7 @@ async function autoPublishFreshArticles() {
       addLog("success", `Successfully published to WordPress! ID: ${wpId}`, "publisher");
 
       // Step C: Send WhatsApp Notifier
-      const msgBody = `📰 *SaaMedia News Alert*: ${article.title}\n\n*Summary*: ${article.summary}\n\n*Read more*: https://saamedia.com.ng/?p=${wpId}`;
+      const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
       addLog("info", `Dispatching WhatsApp alerts to admin...`, "whatsapp");
 
       try {
@@ -1165,11 +1282,46 @@ app.get("/api/config", (req, res) => {
 
 app.post("/api/config", (req, res) => {
   const db = loadDb();
+  const oldGateway = db.config ? db.config.whatsappGateway : null;
   db.config = { ...db.config, ...req.body };
   saveDb(db);
   addLog("success", `System configuration updated by admin.`, "system");
   startSchedulerLoop(); // Hot restart scheduler on updated timing
+  
+  const newGateway = db.config.whatsappGateway;
+  if (newGateway === "whatsapp-web" && !whatsappClient) {
+    initializeWhatsAppWebClient();
+  } else if (oldGateway === "whatsapp-web" && newGateway !== "whatsapp-web" && whatsappClient) {
+    addLog("info", "Switching away from WhatsApp Web gateway. Gracefully destroying client browser to save resources.", "whatsapp");
+    whatsappClient.destroy().catch(() => {});
+    whatsappClient = null;
+    whatsappClientStatus = "DISCONNECTED";
+    whatsappQrCodeDataUrl = null;
+  }
+
   res.json({ status: "ok", config: db.config });
+});
+
+// WhatsApp API endpoints for managing the live whatsapp-web.js instance
+app.get("/api/whatsapp/status", (req, res) => {
+  res.json({
+    status: whatsappClientStatus,
+    qrCode: whatsappQrCodeDataUrl,
+    error: whatsappConnectionError,
+    recipient: loadDb().config.whatsappRecipient || ""
+  });
+});
+
+app.post("/api/whatsapp/reconnect", async (req, res) => {
+  addLog("info", "Manual request received to restart/reconnect WhatsApp Web client.", "whatsapp");
+  if (whatsappClient) {
+    try {
+      await whatsappClient.destroy();
+    } catch (_) {}
+    whatsappClient = null;
+  }
+  initializeWhatsAppWebClient();
+  res.json({ status: "ok", message: "WhatsApp Web client initialization re-triggered successfully." });
 });
 
 app.get("/api/sources", (req, res) => {
@@ -1341,7 +1493,7 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     addLog("success", `Article force-published to WordPress successfully! WP ID: ${wpId}`, "publisher");
 
     // 3. WhatsApp Alerts dispatch
-    const msgBody = `📰 *SaaMedia News Alert*: ${article.title}\n\n*Summary*: ${article.summary}\n\n*Read more*: https://saamedia.com.ng/?p=${wpId}`;
+    const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
     try {
       const waSuccess = await sendWhatsAppMessage(config, msgBody);
       article.whatsappSent = waSuccess;
@@ -1436,6 +1588,16 @@ async function startServer() {
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`SaaMedia News Automation Node server is actively listening on http://localhost:${PORT}`);
   });
+
+  // Start WhatsApp Web Client if active in DB config
+  try {
+    const db = loadDb();
+    if (db.config && db.config.whatsappGateway === "whatsapp-web") {
+      initializeWhatsAppWebClient();
+    }
+  } catch (err) {
+    console.error("Failed to automatically boot WhatsApp Web client on startup:", err);
+  }
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
