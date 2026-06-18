@@ -4,12 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
-import * as baileysModule from "@whiskeysockets/baileys";
-
-// Robustly resolve Baileys exports to avoid CJS/ESM bundling issues
-const useMultiFileAuthState = baileysModule.useMultiFileAuthState;
-const DisconnectReason = baileysModule.DisconnectReason;
-const makeWASocket = (baileysModule.default || (baileysModule as any).makeWASocket || baileysModule) as any;
+import { makeWASocket, useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 
