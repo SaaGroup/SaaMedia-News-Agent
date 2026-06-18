@@ -1537,6 +1537,14 @@ export default function App() {
                                   Whispering secure setup. Generating QR scan-token. Please wait...
                                 </p>
                               </div>
+                            ) : waStatus.status === "ERROR" ? (
+                              <div className="text-center space-y-2 text-rose-450 p-4">
+                                <div className="text-3xl">⚠️</div>
+                                <div className="text-xs font-semibold uppercase tracking-wider font-mono text-rose-400">Connection Error</div>
+                                <p className="text-[10px] text-rose-350 leading-relaxed max-w-[200px] mx-auto bg-rose-950/25 p-2.5 rounded-xl border border-rose-900/30 font-mono break-words">
+                                  {waStatus.error || "Headless system standby. Connection timeout or socket failure."}
+                                </p>
+                              </div>
                             ) : (
                               <div className="text-center space-y-2 text-slate-400">
                                 <div className="text-3xl">📵</div>

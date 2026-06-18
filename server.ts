@@ -11,6 +11,15 @@ import pino from "pino";
 const app = express();
 const PORT = 3000;
 
+// Prevent potential process crashes from background library micro-tasks (like Baileys network disconnects)
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection caught at:", promise, "reason:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception caught:", err);
+});
+
 app.use(express.json({ limit: "50mb" }));
 
 // WhatsApp Web Client Global State (Powered by @whiskeysockets/baileys)
@@ -57,12 +66,20 @@ async function initializeWhatsAppWebClient() {
 
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode || (lastDisconnect?.error as any)?.statusCode;
+        const errMessage = lastDisconnect?.error?.message || "Connection timed out or closed.";
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         whatsappClientStatus = "DISCONNECTED";
         whatsappQrCodeDataUrl = null;
         
+        if (lastDisconnect?.error) {
+          whatsappClientStatus = "ERROR";
+          whatsappConnectionError = `Disconnected (statusCode: ${statusCode || "unknown"}): ${errMessage}`;
+        } else {
+          whatsappConnectionError = null;
+        }
+        
         if (shouldReconnect) {
-          addLog("warn", `WhatsApp Web connection closed. Reason: ${lastDisconnect?.error?.message || "unknown"}. Re-initializing in 5s...`, "whatsapp");
+          addLog("warn", `WhatsApp Web connection closed. Reason: ${errMessage}. Re-initializing in 5s...`, "whatsapp");
           whatsappClient = null;
           // Attempt recovery after a brief delay
           setTimeout(() => {
@@ -136,15 +153,17 @@ function loadDb() {
     } else {
       // Automatic migration: If the database contains old sources (e.g. punchng, arisetv, channelstv), replace with new category sources
       const containsOldSources = parsed.sources.some((s: any) => 
-        s.id === "punchng" || 
-        s.id === "arisetv" || 
-        s.id === "nairametrics" || 
-        s.id === "businessdayng" || 
-        s.id.includes("channelstv") ||
-        (s.feedUrl && s.feedUrl.includes("punchng")) ||
-        (s.feedUrl && s.feedUrl.includes("nairametrics")) ||
-        (s.feedUrl && s.feedUrl.includes("channelstv")) ||
-        (s.feedUrl && s.feedUrl === "https://www.channelstv.com/feed/")
+        s && (
+          s.id === "punchng" || 
+          s.id === "arisetv" || 
+          s.id === "nairametrics" || 
+          s.id === "businessdayng" || 
+          (s.id && typeof s.id === "string" && s.id.includes("channelstv")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("punchng")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("nairametrics")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("channelstv")) ||
+          (s.feedUrl && s.feedUrl === "https://www.channelstv.com/feed/")
+        )
       );
       if (containsOldSources || parsed.sources.length !== DEFAULT_SOURCES.length) {
         parsed.sources = DEFAULT_SOURCES;
