@@ -75,6 +75,20 @@ export default function App() {
     sourceCounts: {} as Record<string, number>
   });
 
+  // WhatsApp Live Client Status State
+  const [waStatus, setWaStatus] = useState<{
+    status: 'DISCONNECTED' | 'AUTHENTICATING' | 'QR_RECEIVED' | 'CONNECTED' | 'ERROR';
+    qrCode: string | null;
+    error: string | null;
+    recipient: string;
+  }>({
+    status: 'DISCONNECTED',
+    qrCode: null,
+    error: null,
+    recipient: ''
+  });
+  const [waLoading, setWaLoading] = useState(false);
+
   // UI Interactive States
   const [loading, setLoading] = useState(false);
   const [scraping, setScraping] = useState(false);
@@ -410,6 +424,27 @@ export default function App() {
     const interval = setInterval(() => fetchData(true), 15000);
     return () => clearInterval(interval);
   }, []);
+
+  const fetchWaStatus = async () => {
+    try {
+      const res = await fetch("/api/whatsapp/status");
+      if (res.ok) {
+        const data = await res.json();
+        setWaStatus(data);
+      }
+    } catch (e) {
+      console.warn("Failed to fetch WhatsApp Web client status:", e);
+    }
+  };
+
+  // WhatsApp helper polling if whatsapp-web is selected
+  useEffect(() => {
+    if (config.whatsappGateway !== "whatsapp-web") return;
+    
+    fetchWaStatus();
+    const interval = setInterval(fetchWaStatus, 5000);
+    return () => clearInterval(interval);
+  }, [config.whatsappGateway]);
 
   // Filter queues
   const reviewQueue = articles.filter(a => a.status === "scraped" || a.status === "approved" || a.status === "failed" || a.status === "publishing");
@@ -1374,12 +1409,12 @@ export default function App() {
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">WhatsApp Recipient Number *</label>
+                        <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">WhatsApp Recipient (Number or Group ID) *</label>
                         <input
                           type="text"
                           value={config.whatsappRecipient}
                           onChange={(e) => setConfig({ ...config, whatsappRecipient: e.target.value })}
-                          placeholder="e.g., +2348030000000"
+                          placeholder="e.g., 2348030000000 or group ID"
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751] font-mono"
                         />
                       </div>
@@ -1388,10 +1423,11 @@ export default function App() {
                         <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-455 mb-1">Direct Gateway Selected</label>
                         <select
                           value={config.whatsappGateway}
-                          onChange={(e) => setConfig({ ...config, whatsappGateway: e.target.value as "twilio" | "custom_webhook" | "mock" })}
+                          onChange={(e) => setConfig({ ...config, whatsappGateway: e.target.value as "twilio" | "custom_webhook" | "mock" | "whatsapp-web" })}
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                         >
                           <option value="mock">Log Simulation Channel (Instant - Zero Config Sandbox)</option>
+                          <option value="whatsapp-web">Exclusively Free WhatsApp (whatsapp-web.js Link Device)</option>
                           <option value="twilio">Twilio Programmable WhatsApp SMS Engine (Professional)</option>
                           <option value="custom_webhook">Custom Webhook POST Trigger (Ultramsg, Chat-Api, copy, etc.)</option>
                         </select>
@@ -1454,6 +1490,107 @@ export default function App() {
                           className="w-full text-xs font-mono bg-[#162033] border border-slate-700 text-slate-100 rounded-lg px-3 py-2 focus:border-[#008751] focus:outline-none"
                         />
                         <p className="text-[10px] text-slate-458 mt-1">System parses {`{ recipient, message, timestamp }`} and launches HTTP POST on successful publish.</p>
+                      </motion.div>
+                    )}
+
+                    {config.whatsappGateway === "whatsapp-web" && (
+                      <motion.div 
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        className="bg-[#0B0F1A] p-5 rounded-2xl border border-slate-800 space-y-4 mt-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-mono font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                            <span className={`w-2.5 h-2.5 rounded-full ${
+                              waStatus.status === "CONNECTED" ? "bg-emerald-500 animate-pulse" :
+                              waStatus.status === "QR_RECEIVED" ? "bg-cyan-500 animate-pulse" :
+                              waStatus.status === "AUTHENTICATING" ? "bg-amber-500 animate-pulse" :
+                              "bg-slate-500"
+                            }`} />
+                            WhatsApp Web Live Link Client
+                          </h4>
+                          <span className="text-[11px] font-mono text-slate-400">
+                            Status: <strong className="text-slate-200">{waStatus.status}</strong>
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+                          {/* QR / Status Display */}
+                          <div className="flex flex-col items-center justify-center bg-[#131926] p-5 rounded-xl border border-slate-800/80 min-h-[220px]">
+                            {waStatus.status === "QR_RECEIVED" && waStatus.qrCode ? (
+                              <div className="bg-white p-3 rounded-lg shadow-xl">
+                                <img src={waStatus.qrCode} alt="WhatsApp Web Link QR Code" className="w-[170px] h-[170px] object-contain" />
+                              </div>
+                            ) : waStatus.status === "CONNECTED" ? (
+                              <div className="text-center space-y-2">
+                                <div className="text-4xl">🟢</div>
+                                <div className="font-semibold text-emerald-400 text-sm">Successfully Connected</div>
+                                <p className="text-[10px] text-slate-400 max-w-[220px] mx-auto leading-relaxed">
+                                  Your phone has scanned the QR. News alerts will send on-demand to the designated recipient or group!
+                                </p>
+                              </div>
+                            ) : waStatus.status === "AUTHENTICATING" ? (
+                              <div className="text-center space-y-2">
+                                <div className="animate-spin text-xl text-[#008751] inline-block">⚡</div>
+                                <div className="text-xs font-semibold text-slate-300">Spawning Virtual Browser...</div>
+                                <p className="text-[10px] text-slate-450 max-w-[170px] mx-auto font-mono">
+                                  Whispering secure setup. Generating QR scan-token. Please wait...
+                                </p>
+                              </div>
+                            ) : (
+                              <div className="text-center space-y-2 text-slate-400">
+                                <div className="text-3xl">📵</div>
+                                <div className="text-xs font-semibold">Disconnected Session</div>
+                                <p className="text-[10px] text-slate-500 max-w-[200px] mx-auto leading-relaxed">
+                                  The headless system is standby. Initialize a browser instance to receive scan code.
+                                </p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Action panel */}
+                          <div className="space-y-4">
+                            <div>
+                              <span className="text-[11px] text-[#008751] font-mono uppercase bg-[#008751]/10 px-2.5 py-1 rounded-full font-semibold">Instructions to pair:</span>
+                              <ol className="list-decimal list-inside text-xs text-slate-300 space-y-1.5 mt-2 ml-1 leading-relaxed">
+                                <li>Open <strong>WhatsApp</strong> on your mobile device</li>
+                                <li>Tap <strong>Settings</strong> or <strong>Menu (3-dots)</strong></li>
+                                <li>Click <strong>Linked Devices</strong> &rarr; <strong>Link a Device</strong></li>
+                                <li>Scan the live QR code displayed on the left</li>
+                              </ol>
+                            </div>
+
+                            <div className="pt-2 border-t border-slate-800 space-y-2">
+                              <p className="text-[10px] text-slate-450 leading-relaxed">
+                                💡 <strong>Aesthetic Recipient Advice:</strong> Insert a country-coded number (e.g. <code className="bg-[#131926] px-1 py-0.5 rounded text-amber-300 font-mono">2348031234567</code>) or a Group ID (e.g. <code className="bg-[#131926] px-1 py-0.5 rounded text-amber-300 font-mono">1203632345678@g.us</code>) to dispatch to groups.
+                              </p>
+
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setWaLoading(true);
+                                  try {
+                                    const res = await fetch("/api/whatsapp/reconnect", { method: "POST" });
+                                    if (res.ok) {
+                                      triggerAlert("success", "Rebuilding browser driver session... Loading new QR soon.");
+                                      fetchWaStatus();
+                                    } else {
+                                      triggerAlert("error", "Failed to reset session.");
+                                    }
+                                  } catch (err) {
+                                    triggerAlert("error", "Error contacting container host.");
+                                  } finally {
+                                    setWaLoading(false);
+                                  }
+                                }}
+                                disabled={waLoading}
+                                className="text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white rounded-xl px-4 py-2.5 inline-flex items-center gap-1.5 transition disabled:opacity-50"
+                              >
+                                {waLoading ? "Booting Driver..." : "🔄 Refresh QR Code or Force Restart"}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
                       </motion.div>
                     )}
                   </div>
