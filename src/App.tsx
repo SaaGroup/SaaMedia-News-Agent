@@ -1427,7 +1427,7 @@ export default function App() {
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                         >
                           <option value="mock">Log Simulation Channel (Instant - Zero Config Sandbox)</option>
-                          <option value="whatsapp-web">Exclusively Free WhatsApp (whatsapp-web.js Link Device)</option>
+                          <option value="whatsapp-web">Exclusively Free WhatsApp (Baileys Engine Link Device)</option>
                           <option value="twilio">Twilio Programmable WhatsApp SMS Engine (Professional)</option>
                           <option value="custom_webhook">Custom Webhook POST Trigger (Ultramsg, Chat-Api, copy, etc.)</option>
                         </select>

@@ -6,6 +6,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
+import pino from "pino";
 
 const app = express();
 const PORT = 3000;
@@ -35,6 +36,8 @@ async function initializeWhatsAppWebClient() {
     whatsappClient = makeWASocket({
       auth: state,
       printQRInTerminal: false,
+      logger: pino({ level: "warn" }),
+      connectTimeoutMs: 60000,
     });
 
     whatsappClient.ev.on("creds.update", saveCreds);
@@ -1322,8 +1325,14 @@ app.post("/api/config", (req, res) => {
   if (newGateway === "whatsapp-web" && !whatsappClient) {
     initializeWhatsAppWebClient();
   } else if (oldGateway === "whatsapp-web" && newGateway !== "whatsapp-web" && whatsappClient) {
-    addLog("info", "Switching away from WhatsApp Web gateway. Gracefully destroying client browser to save resources.", "whatsapp");
-    whatsappClient.destroy().catch(() => {});
+    addLog("info", "Switching away from WhatsApp Web gateway. Gracefully disconnecting Baileys client to save resources.", "whatsapp");
+    try {
+      if (typeof whatsappClient.logout === "function") {
+        whatsappClient.logout().catch(() => {});
+      } else if (typeof whatsappClient.end === "function") {
+        whatsappClient.end(undefined);
+      }
+    } catch (_) {}
     whatsappClient = null;
     whatsappClientStatus = "DISCONNECTED";
     whatsappQrCodeDataUrl = null;
@@ -1346,7 +1355,11 @@ app.post("/api/whatsapp/reconnect", async (req, res) => {
   addLog("info", "Manual request received to restart/reconnect WhatsApp Web client.", "whatsapp");
   if (whatsappClient) {
     try {
-      await whatsappClient.destroy();
+      if (typeof whatsappClient.logout === "function") {
+        await whatsappClient.logout().catch(() => {});
+      } else if (typeof whatsappClient.end === "function") {
+        whatsappClient.end(undefined);
+      }
     } catch (_) {}
     whatsappClient = null;
   }
