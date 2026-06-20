@@ -80,9 +80,7 @@ async function initializeWhatsAppWebClient() {
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode || (lastDisconnect?.error as any)?.statusCode;
         const errMessage = lastDisconnect?.error?.message || "Connection timed out or closed.";
-        const isAuthFailure = statusCode === DisconnectReason.loggedOut || statusCode === 405;
-        const shouldReconnect = !isAuthFailure;
-        
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         whatsappClientStatus = "DISCONNECTED";
         whatsappQrCodeDataUrl = null;
         
@@ -91,24 +89,6 @@ async function initializeWhatsAppWebClient() {
           whatsappConnectionError = `Disconnected (statusCode: ${statusCode || "unknown"}): ${errMessage}`;
         } else {
           whatsappConnectionError = null;
-        }
-
-        if (isAuthFailure) {
-          addLog("error", `WhatsApp credentials/session revoked (statusCode: ${statusCode}). Purging stale auth folder so a fresh QR code can be generated.`, "whatsapp");
-          try {
-            const authPath = path.join(process.cwd(), ".baileys_auth");
-            if (fs.existsSync(authPath)) {
-              fs.rmSync(authPath, { recursive: true, force: true });
-            }
-          } catch (delErr: any) {
-            addLog("warn", `Could not clear stale Baileys session folder: ${delErr.message}`, "whatsapp");
-          }
-          whatsappClient = null;
-          addLog("info", `Restarting WhatsApp initialization in 3 seconds to prompt a fresh login QR...`, "whatsapp");
-          setTimeout(() => {
-            initializeWhatsAppWebClient();
-          }, 3000);
-          return;
         }
         
         if (shouldReconnect) {
@@ -126,28 +106,6 @@ async function initializeWhatsAppWebClient() {
         whatsappClientStatus = "CONNECTED";
         whatsappQrCodeDataUrl = null;
         addLog("success", "SaaMedia WhatsApp Bot is online and CONNECTED! Ready to send alerts.", "whatsapp");
-        
-        // Stagger the group discovery by 5 seconds to prevent early socket congestion/rejection (error 405)
-        setTimeout(async () => {
-          if (!whatsappClient || whatsappClientStatus !== "CONNECTED") return;
-          try {
-            addLog("info", "Connected! Querying active group chats to discover JIDs...", "whatsapp");
-            const groups = await whatsappClient.groupFetchAllParticipating();
-            const groupKeys = Object.keys(groups);
-            if (groupKeys.length > 0) {
-              addLog("info", `---------- DISCOVERED ACTIVE WHATSAPP GROUPS ----------`, "whatsapp");
-              for (const gId of groupKeys) {
-                const gMeta = groups[gId];
-                addLog("info", `Group ID (JID): "${gId}" | Group Name: "${gMeta.subject || "No Name"}"`, "whatsapp");
-              }
-              addLog("info", `-------------------------------------------------------`, "whatsapp");
-            } else {
-              addLog("info", "No active WhatsApp groups discovered for this connected phone number.", "whatsapp");
-            }
-          } catch (gErr: any) {
-            addLog("warn", `Could not automatically fetch listed group JIDs: ${gErr.message}`, "whatsapp");
-          }
-        }, 5000);
       }
     });
 
@@ -516,32 +474,8 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
     }
 
     try {
-      let recipientInput = config.whatsappRecipient.trim();
-      let recipientId = recipientInput.replace(/\+/g, "");
-
-      // Check if recipient is a group invite URL or has chat.whatsapp.com
-      if (recipientInput.includes("chat.whatsapp.com")) {
-        try {
-          const parts = recipientInput.split("/");
-          const lastPart = parts[parts.length - 1].split("?")[0].trim();
-          addLog("info", `WhatsApp Recipient detected as Invite Link. Extracted code: "${lastPart}". Resolving JID...`, "whatsapp");
-          const inviteInfo = await whatsappClient.groupGetInviteInfo(lastPart);
-          if (inviteInfo && inviteInfo.id) {
-            recipientId = inviteInfo.id;
-            addLog("success", `Resolved Invite Link directly! Group Name: "${inviteInfo.subject}" | JID: "${recipientId}"`, "whatsapp");
-          } else {
-            throw new Error(`Failed to extract JID from invite metadata.`);
-          }
-        } catch (inviteErr: any) {
-          addLog("warn", `Could not automatically resolve invite link via Baileys API: ${inviteErr.message}`, "whatsapp");
-          // Fallback to extraction from parts just in case
-          const parts = recipientInput.split("/");
-          recipientId = parts[parts.length - 1].split("?")[0].trim();
-          if (!recipientId.endsWith("@g.us")) {
-            recipientId = `${recipientId}@g.us`;
-          }
-        }
-      } else if (!recipientId.endsWith("@s.whatsapp.net") && !recipientId.endsWith("@g.us")) {
+      let recipientId = config.whatsappRecipient.trim().replace(/\+/g, "");
+      if (!recipientId.endsWith("@s.whatsapp.net") && !recipientId.endsWith("@g.us")) {
         if (recipientId.includes("-") || recipientId.length > 15) {
           recipientId = `${recipientId}@g.us`;
         } else {
@@ -907,6 +841,10 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
 
     // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, etc.
     cleanText = cleanScrapedArticleText(cleanText, sourceName);
+
+    if (cleanText.length > 10000) {
+      cleanText = cleanText.substring(0, 10000) + "... [truncated]";
+    }
 
     addLog("success", `Crawled original webpage successfully. Extracted ${cleanText.length} characters, featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
 
