@@ -4,7 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
-import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 
@@ -42,7 +42,20 @@ async function initializeWhatsAppWebClient() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState(path.join(process.cwd(), ".baileys_auth"));
 
+    // Dynamically retrieve the latest WhatsApp Web version to bypass version 405 deprecations
+    let waVersion: any = [2, 3000, 1041748294];
+    try {
+      const { version: fetchedVersion } = await fetchLatestWaWebVersion({});
+      if (fetchedVersion && Array.isArray(fetchedVersion)) {
+        waVersion = fetchedVersion;
+        addLog("info", `Fetched latest active WhatsApp Web version: ${waVersion.join(".")}`, "whatsapp");
+      }
+    } catch (err: any) {
+      addLog("warn", `Could not dynamically fetch WhatsApp Web version: ${err.message}. Defaulting to fallback security version: ${waVersion.join(".")}`, "whatsapp");
+    }
+
     whatsappClient = makeWASocket({
+      version: waVersion,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
