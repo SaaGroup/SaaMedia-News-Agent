@@ -4,7 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } from "@whiskeysockets/baileys";
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion, Browsers } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 
@@ -27,6 +27,7 @@ let whatsappClient: any = null;
 let whatsappClientStatus: "DISCONNECTED" | "AUTHENTICATING" | "QR_RECEIVED" | "CONNECTED" | "ERROR" = "DISCONNECTED";
 let whatsappQrCodeDataUrl: string | null = null;
 let whatsappConnectionError: string | null = null;
+let activeWaVersion: any = null; // Memory cache to prevent 429 blocks during reconnect loops
 
 async function initializeWhatsAppWebClient() {
   if (whatsappClient) {
@@ -42,56 +43,62 @@ async function initializeWhatsAppWebClient() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState(path.join(process.cwd(), ".baileys_auth"));
 
-    // Dynamically retrieve the latest WhatsApp Web version to bypass version 405 deprecations
-    let waVersion: any = [2, 3000, 1017589087];
-    try {
-      addLog("info", "Attempting to dynamically fetch live WhatsApp Web version safely...", "whatsapp");
-      const res = await fetch("https://web.whatsapp.com/sw.js", {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-        }
-      });
-      if (res.ok) {
-        const text = await res.text();
-        const regex = /"client_revision":\s*(\d+)/;
-        const match = text.match(regex);
-        if (match && match[1]) {
-          const clientRev = parseInt(match[1], 10);
-          waVersion = [2, 3000, clientRev];
-          addLog("info", `Successfully fetched active live WhatsApp Web version: ${waVersion.join(".")}`, "whatsapp");
-        } else {
-          // Fallback to searching home page if sw.js is updated differently
-          const homeRes = await fetch("https://web.whatsapp.com/", {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-            }
-          });
-          if (homeRes.ok) {
-            const homeText = await homeRes.text();
-            const revMatch = homeText.match(/client_revision":\s*(\d+)/);
-            if (revMatch && revMatch[1]) {
-              const clientRev = parseInt(revMatch[1], 10);
-              waVersion = [2, 3000, clientRev];
-              addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${waVersion.join(".")}`, "whatsapp");
+    // Cache the fetched version globally to avoid repeating fetch queries and hitting 429 rate limit
+    if (!activeWaVersion) {
+      activeWaVersion = [2, 3000, 1023223821]; // Standard robust default of @whiskeysockets/baileys v6.7.23
+      try {
+        addLog("info", "Attempting a dynamic live WhatsApp Web version fetch safely... (once per session)", "whatsapp");
+        const res = await fetch("https://web.whatsapp.com/sw.js", {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+          }
+        });
+        if (res.ok) {
+          const text = await res.text();
+          const regex = /"client_revision":\s*(\d+)/;
+          const match = text.match(regex);
+          if (match && match[1]) {
+            const clientRev = parseInt(match[1], 10);
+            activeWaVersion = [2, 3000, clientRev];
+            addLog("info", `Successfully fetched active live WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
+          } else {
+            // Fallback to searching home page if sw.js is updated differently
+            const homeRes = await fetch("https://web.whatsapp.com/", {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+              }
+            });
+            if (homeRes.ok) {
+              const homeText = await homeRes.text();
+              const revMatch = homeText.match(/client_revision":\s*(\d+)/);
+              if (revMatch && revMatch[1]) {
+                const clientRev = parseInt(revMatch[1], 10);
+                activeWaVersion = [2, 3000, clientRev];
+                addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${activeWaVersion.join(".")}`, "whatsapp");
+              } else {
+                addLog("warn", `Regex client_revision matching failed. Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
+              }
             } else {
-              addLog("warn", "Regex client_revision matching failed. Falling back to robust static version.", "whatsapp");
+              addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
             }
           }
+        } else {
+          addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback: ${activeWaVersion.join(".")}`, "whatsapp");
         }
-      } else {
-        addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback.`, "whatsapp");
+      } catch (err: any) {
+        addLog("warn", `Could not dynamically fetch WhatsApp Web version: ${err.message}. Defaulting to robust fallback: ${activeWaVersion.join(".")}`, "whatsapp");
       }
-    } catch (err: any) {
-      addLog("warn", `Could not dynamically fetch WhatsApp Web version: ${err.message}. Defaulting to fallback security version: ${waVersion.join(".")}`, "whatsapp");
+    } else {
+      addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
     }
 
     whatsappClient = makeWASocket({
-      version: waVersion,
+      version: activeWaVersion,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
       connectTimeoutMs: 60000,
-      browser: ["Windows", "Chrome", "125.0.0.0"],
+      browser: Browsers.macOS("Desktop"),
     });
 
     whatsappClient.ev.on("creds.update", saveCreds);
@@ -647,6 +654,67 @@ async function getGeminiClient(): Promise<GoogleGenAI> {
   });
 }
 
+// Helper functions to identify metadata and adverts to discard during scraping
+
+const monthRegex = /(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)/i;
+
+function isDatePattern(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  if (!clean) return false;
+
+  // 1. Check relative date e.g. "2 hours ago", "1 day ago", "20 mins ago", "just now"
+  if (/\b\d+\s*(?:second|sec|minute|min|hour|hr|day|week|month|year)s?\s+ago\b/i.test(clean)) return true;
+  if (/^\s*just\s+now\s*$/i.test(clean)) return true;
+
+  // 2. Check absolute month day year patterns e.g. "June 20, 2026", "20 June 2026", "Jun 20, 2026"
+  if (monthRegex.test(clean) && (/\b\d{4}\b/.test(clean) || /\b\d{1,2}\b/.test(clean))) {
+    if (clean.length < 80) return true;
+  }
+
+  // 3. Check standard numeric dates e.g. "20/06/2026" or "2026-06-20", "20-06-2026"
+  if (/\b\d{1,2}[\/\-–]\d{1,2}[\/\-–]\d{2,4}\b/.test(clean)) {
+    if (clean.length < 40) return true;
+  }
+  if (/\b\d{4}[\/\-–]\d{1,2}[\/\-–]\d{1,2}\b/.test(clean)) {
+    if (clean.length < 40) return true;
+  }
+
+  // 4. Check prefixed dates e.g. "published on...", "posted on...", "updated on..."
+  if (/^(?:published|posted|updated|date|time|on)\s*:/i.test(clean)) return true;
+  if (/^(?:published|posted|updated)\s+on\b/i.test(clean)) return true;
+
+  return false;
+}
+
+function isAuthorPattern(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  if (!clean) return false;
+
+  // Exact matching or presence of author/publisher names
+  if (clean.includes("bytvcnews") || clean.includes("by tvcnews") || clean.includes("by tvc news")) return true;
+  if (clean.includes("by daily trust") || clean.includes("by dailytrust")) return true;
+
+  // Lines starting with "by " (excluding general long sentences)
+  if (/^\s*by\s+/i.test(clean)) {
+    if (clean.length < 100) return true;
+  }
+
+  // Prefixed author markers
+  if (/^\s*(?:author|writer|reporter|journalist|editor)\s*:/i.test(clean)) return true;
+
+  return false;
+}
+
+function isAdvertOrUpdateNewsPattern(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  if (!clean) return false;
+
+  if (clean.includes("advert") || clean.includes("update news")) {
+    return true;
+  }
+  return false;
+}
+
 // Helper to clean scraped news content from DailyTrust or TVC News sources to avoid Google adverts, breadcrumbs, related news, and promotional text.
 function cleanScrapedArticleText(rawText: string, sourceName: string): string {
   if (!rawText) return "";
@@ -701,9 +769,19 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       ) {
         continue;
       }
+
+      // 4. Exclude author name and dates of published article/news for DailyTrust/TVC Sources
+      if (isAuthorPattern(p) || isDatePattern(p)) {
+        continue;
+      }
+
+      // 5. Exclude words/phrases like ADVERT, UPDATE NEWS
+      if (isAdvertOrUpdateNewsPattern(p)) {
+        continue;
+      }
     }
 
-    // 4. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
+    // 6. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
     const isBreadcrumb =
       /^\s*home\s*[>»/|]/i.test(p) ||
       (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
@@ -713,7 +791,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       continue;
     }
 
-    // 5. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
+    // 7. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
     if (
       lowerP === "advertisement" ||
       lowerP === "also read" ||
@@ -727,7 +805,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       continue;
     }
 
-    // 6. Exclude Inline Related Posts or News/Articles link blocks
+    // 8. Exclude Inline Related Posts or News/Articles link blocks
     if (
       lowerP.startsWith("also read") ||
       lowerP.startsWith("read also") ||
@@ -765,7 +843,10 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
           lowerLine.includes("advertisement") ||
           lowerLine.includes("advert –>") ||
           lowerLine === "–>" ||
-          lowerLine === "-->"
+          lowerLine === "-->" ||
+          isAuthorPattern(line) ||
+          isDatePattern(line) ||
+          isAdvertOrUpdateNewsPattern(line)
         ) {
           continue;
         }
@@ -1006,6 +1087,7 @@ INSTRUCTIONS:
 2. Write a Professional Short Summary (1-2 sentences) of the core development.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
 4. Write a highly thorough, complete full-length news story, preserving the EXACT original separation of paragraphs in the crawled webpage. Each individual paragraph in the input text MUST be written as its own separate HTML paragraph (using a separate <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'> tag). Do NOT combine, merge, or condense multiple paragraphs into one giant block; instead, articulate and arrange them sequentially matching the natural flow of the news source report. Include every possible detail (descriptions, data, quotes, and timelines).
+   - UNLIMITED LENGTH MANDATE: You MUST make the news story unlimited in character or word count. No matter how long the original news story or article is, it must be fully translated/recreated without any truncating, shortening, condensing, summarizing, or abbreviation. Every single original paragraph, fact, direct/indirect quote, background context, sub-details, and list item must be preserved at full narrative length. Output the complete unabridged narrative.
    - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
    - You MUST embed the elected Featured Image at the absolute top of the article contentHtml.
