@@ -80,7 +80,9 @@ async function initializeWhatsAppWebClient() {
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode || (lastDisconnect?.error as any)?.statusCode;
         const errMessage = lastDisconnect?.error?.message || "Connection timed out or closed.";
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const isAuthFailure = statusCode === DisconnectReason.loggedOut || statusCode === 405;
+        const shouldReconnect = !isAuthFailure;
+        
         whatsappClientStatus = "DISCONNECTED";
         whatsappQrCodeDataUrl = null;
         
@@ -89,6 +91,24 @@ async function initializeWhatsAppWebClient() {
           whatsappConnectionError = `Disconnected (statusCode: ${statusCode || "unknown"}): ${errMessage}`;
         } else {
           whatsappConnectionError = null;
+        }
+
+        if (isAuthFailure) {
+          addLog("error", `WhatsApp credentials/session revoked (statusCode: ${statusCode}). Purging stale auth folder so a fresh QR code can be generated.`, "whatsapp");
+          try {
+            const authPath = path.join(process.cwd(), ".baileys_auth");
+            if (fs.existsSync(authPath)) {
+              fs.rmSync(authPath, { recursive: true, force: true });
+            }
+          } catch (delErr: any) {
+            addLog("warn", `Could not clear stale Baileys session folder: ${delErr.message}`, "whatsapp");
+          }
+          whatsappClient = null;
+          addLog("info", `Restarting WhatsApp initialization in 3 seconds to prompt a fresh login QR...`, "whatsapp");
+          setTimeout(() => {
+            initializeWhatsAppWebClient();
+          }, 3000);
+          return;
         }
         
         if (shouldReconnect) {
@@ -107,8 +127,9 @@ async function initializeWhatsAppWebClient() {
         whatsappQrCodeDataUrl = null;
         addLog("success", "SaaMedia WhatsApp Bot is online and CONNECTED! Ready to send alerts.", "whatsapp");
         
-        // Asynchronously discover and print all active WhatsApp Group IDs (JIDs) to the system logs
-        (async () => {
+        // Stagger the group discovery by 5 seconds to prevent early socket congestion/rejection (error 405)
+        setTimeout(async () => {
+          if (!whatsappClient || whatsappClientStatus !== "CONNECTED") return;
           try {
             addLog("info", "Connected! Querying active group chats to discover JIDs...", "whatsapp");
             const groups = await whatsappClient.groupFetchAllParticipating();
@@ -126,7 +147,7 @@ async function initializeWhatsAppWebClient() {
           } catch (gErr: any) {
             addLog("warn", `Could not automatically fetch listed group JIDs: ${gErr.message}`, "whatsapp");
           }
-        })();
+        }, 5000);
       }
     });
 
