@@ -122,11 +122,8 @@ const DB_PATH = path.join(process.cwd(), "db.json");
 
 // Define Default Values
 const DEFAULT_SOURCES: NewsSource[] = [
-  { id: "vanguardngr-national", name: "Vanguard National News", url: "https://www.vanguardngr.com/category/national-news/", type: "National", feedUrl: "https://www.vanguardngr.com/category/national-news/", enabled: true },
-  { id: "vanguardngr-politics", name: "Vanguard Politics", url: "https://www.vanguardngr.com/category/politics/", type: "Politics", feedUrl: "https://www.vanguardngr.com/category/politics/", enabled: true },
-  { id: "tvcnews-politics", name: "TVC News Politics", url: "https://www.tvcnews.tv/category/politics-news/", type: "Politics", feedUrl: "https://www.tvcnews.tv/category/politics-news/", enabled: true },
-  { id: "dailytrust-news", name: "DailyTrust News", url: "https://dailytrust.com/topics/news/", type: "National", feedUrl: "https://dailytrust.com/topics/news/", enabled: true },
-  { id: "dailytrust-politics", name: "DailyTrust Politics", url: "https://dailytrust.com/topics/politics/", type: "Politics", feedUrl: "https://dailytrust.com/topics/politics/", enabled: true }
+  { id: "dailytrust-home", name: "DailyTrust Home", url: "https://dailytrust.com/", type: "National", feedUrl: "https://dailytrust.com/", enabled: true },
+  { id: "tvcnews-home", name: "TVC News Home", url: "https://www.tvcnews.tv/", type: "Politics", feedUrl: "https://www.tvcnews.tv/", enabled: true }
 ];
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -164,18 +161,27 @@ function loadDb() {
     if (!parsed.sources) {
       parsed.sources = DEFAULT_SOURCES;
     } else {
-      // Automatic migration: If the database contains old sources (e.g. punchng, arisetv, channelstv), replace with new category sources
+      // Automatic migration: If the database contains old sources (e.g. punchng, vanguardngr, subpaths), replace with new default sources
       const containsOldSources = parsed.sources.some((s: any) => 
         s && (
           s.id === "punchng" || 
           s.id === "arisetv" || 
           s.id === "nairametrics" || 
           s.id === "businessdayng" || 
+          s.id === "vanguardngr-national" ||
+          s.id === "vanguardngr-politics" ||
+          s.id === "tvcnews-politics" ||
+          s.id === "dailytrust-news" ||
+          s.id === "dailytrust-politics" ||
           (s.id && typeof s.id === "string" && s.id.includes("channelstv")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("punchng")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("nairametrics")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("channelstv")) ||
-          (s.feedUrl && s.feedUrl === "https://www.channelstv.com/feed/")
+          (s.url && typeof s.url === "string" && s.url.includes("vanguardngr")) ||
+          (s.url && typeof s.url === "string" && s.url.includes("topics/news")) ||
+          (s.url && typeof s.url === "string" && s.url.includes("topics/politics")) ||
+          (s.url && typeof s.url === "string" && s.url.includes("category/politics-news")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("vanguardngr")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("topics/news")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("topics/politics")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("category/politics-news"))
         )
       );
       if (containsOldSources || parsed.sources.length !== DEFAULT_SOURCES.length) {
@@ -543,6 +549,162 @@ async function getGeminiClient(): Promise<GoogleGenAI> {
   });
 }
 
+// Helper to clean scraped news content from DailyTrust or TVC News sources to avoid Google adverts, breadcrumbs, related news, and promotional text.
+function cleanScrapedArticleText(rawText: string, sourceName: string): string {
+  if (!rawText) return "";
+
+  // Split content by paragraphs or lines to filter them
+  const paragraphs = rawText.split(/\n\n+/);
+  const cleanedParagraphs: string[] = [];
+
+  const lowerSource = (sourceName || "").toLowerCase();
+  const isDailyTrustOrTvc = lowerSource.includes("dailytrust") || lowerSource.includes("daily trust") || lowerSource.includes("tvc");
+
+  for (let p of paragraphs) {
+    p = p.trim();
+    if (!p) continue;
+
+    const lowerP = p.toLowerCase();
+
+    // If DailyTrust or TVC News, apply stricter filtering of target advert lines/blocks
+    if (isDailyTrustOrTvc) {
+      // 1. Google Ads and tag managers JavaScript blocks / code snippets
+      if (
+        lowerP.includes("googletag") ||
+        lowerP.includes("window.googletag") ||
+        lowerP.includes("defineslot") ||
+        lowerP.includes("pubads") ||
+        lowerP.includes("enablesinglerequest") ||
+        lowerP.includes("enableservices") ||
+        lowerP.includes("div-gpt-ad") ||
+        lowerP.includes("dailytrust.com_300_600") ||
+        lowerP.includes("dailytrust_article_bottom")
+      ) {
+        continue;
+      }
+
+      // 2. Specific premium domain brokerage ads
+      if (
+        lowerP.includes("invest ₦2.5 million") ||
+        lowerP.includes("premium domains") ||
+        lowerP.includes("profit about ₦17") ||
+        lowerP.includes("earnings paid in us dollars") ||
+        lowerP.includes("rather than wonder") ||
+        lowerP.includes("click here to find out")
+      ) {
+        continue;
+      }
+
+      // 3. WhatsApp Community prompt
+      if (
+        lowerP.includes("daily trust whatsapp community") ||
+        lowerP.includes("join daily trust whatsapp") ||
+        lowerP.includes("quick access to news and happenings")
+      ) {
+        continue;
+      }
+    }
+
+    // 4. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
+    const isBreadcrumb =
+      /^\s*home\s*[>»/|]/i.test(p) ||
+      (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
+      /^\s*home\s+topics\s+/i.test(p) ||
+      /^\s*home\s+news\s+/i.test(p);
+    if (isBreadcrumb) {
+      continue;
+    }
+
+    // 5. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
+    if (
+      lowerP === "advertisement" ||
+      lowerP === "also read" ||
+      lowerP === "read more" ||
+      lowerP === "sponsor ad" ||
+      lowerP === "advert" ||
+      lowerP === "advert –>" ||
+      lowerP === "–>" ||
+      lowerP === "-->"
+    ) {
+      continue;
+    }
+
+    // 6. Exclude Inline Related Posts or News/Articles link blocks
+    if (
+      lowerP.startsWith("also read") ||
+      lowerP.startsWith("read also") ||
+      lowerP.startsWith("read more") ||
+      lowerP.startsWith("advertisement") ||
+      lowerP.startsWith("related news") ||
+      lowerP.startsWith("related post") ||
+      lowerP.startsWith("related article") ||
+      lowerP.startsWith("inline related") ||
+      /related:\s/i.test(p) ||
+      /\[related\]/i.test(p) ||
+      lowerP.includes("inline related post") ||
+      lowerP.includes("inline related news") ||
+      lowerP.includes("inline related article")
+    ) {
+      continue;
+    }
+
+    // Also parse line-by-line inside paragraphs to be extremely precise
+    const lines = p.split("\n");
+    const cleanedLines: string[] = [];
+    for (let line of lines) {
+      line = line.trim();
+      const lowerLine = line.toLowerCase();
+      if (!line) continue;
+
+      if (isDailyTrustOrTvc) {
+        if (
+          lowerLine.includes("googletag") ||
+          lowerLine.includes("div-gpt-ad") ||
+          lowerLine.includes("premium domains") ||
+          lowerLine.includes("invest ₦2.5 million") ||
+          lowerLine.includes("daily trust whatsapp community") ||
+          lowerLine.includes("sponsor ad") ||
+          lowerLine.includes("advertisement") ||
+          lowerLine.includes("advert –>") ||
+          lowerLine === "–>" ||
+          lowerLine === "-->"
+        ) {
+          continue;
+        }
+      }
+
+      if (
+        lowerLine.startsWith("also read") ||
+        lowerLine.startsWith("read also") ||
+        lowerLine.startsWith("read more") ||
+        lowerLine.startsWith("related:\s") ||
+        /^\s*home\s*[>»/|]/i.test(line)
+      ) {
+        continue;
+      }
+
+      cleanedLines.push(line);
+    }
+
+    if (cleanedLines.length > 0) {
+      cleanedParagraphs.push(cleanedLines.join("\n"));
+    }
+  }
+
+  let result = cleanedParagraphs.filter(Boolean).join("\n\n").trim();
+
+  // Strip additional hardcoded blocks
+  result = result
+    .replace(/googletag\.cmd\.push\(function\(\)[\s\S]*?\}\);/gi, "")
+    .replace(/window\.googletag[\s\S]*?\}\);/gi, "")
+    .replace(/ADVERT\s*–>[\s\S]*?–>/gi, "")
+    .replace(/ADVERTISEMENT/gi, "")
+    .replace(/ALSO READ/gi, "")
+    .replace(/READ MORE/gi, "");
+
+  return result;
+}
+
 // Web Crawler helper to fetch raw HTML of original article and extract full text plus any image resources
 async function fetchFullPageAndImages(url: string, sourceName: string): Promise<{
   fullText: string;
@@ -677,6 +839,9 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       .join("\n\n")
       .trim();
 
+    // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, etc.
+    cleanText = cleanScrapedArticleText(cleanText, sourceName);
+
     if (cleanText.length > 10000) {
       cleanText = cleanText.substring(0, 10000) + "... [truncated]";
     }
@@ -774,6 +939,7 @@ INSTRUCTIONS:
      - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
      
    - Do NOT append any news source partner credits, back links, reference footers, or footnote/citation blocks at the bottom of the article. Focus entirely on the human-like editorial storytelling text.
+   - STRICTOR EXCLUSIONS: You MUST absolutely avoid, skip, and delete any Google adverts, window.googletag script tags or plain code left-overs, premium domains investing advertisements, WhatsApp community prompts, DailyTrust or TVC News source breadcrumbs, "ADVERTISEMENT", "ALSO READ", "READ MORE" labels/headlines, and any inline related posts, news, or articles links/sections from the news content.
 
 5. Decide which URL represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
 
