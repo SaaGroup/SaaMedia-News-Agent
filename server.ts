@@ -4,7 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion, Browsers } from "@whiskeysockets/baileys";
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 
@@ -27,7 +27,6 @@ let whatsappClient: any = null;
 let whatsappClientStatus: "DISCONNECTED" | "AUTHENTICATING" | "QR_RECEIVED" | "CONNECTED" | "ERROR" = "DISCONNECTED";
 let whatsappQrCodeDataUrl: string | null = null;
 let whatsappConnectionError: string | null = null;
-let activeWaVersion: any = null; // Memory cache to prevent 429 blocks during reconnect loops
 
 async function initializeWhatsAppWebClient() {
   if (whatsappClient) {
@@ -43,62 +42,11 @@ async function initializeWhatsAppWebClient() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState(path.join(process.cwd(), ".baileys_auth"));
 
-    // Cache the fetched version globally to avoid repeating fetch queries and hitting 429 rate limit
-    if (!activeWaVersion) {
-      activeWaVersion = [2, 3000, 1023223821]; // Standard robust default of @whiskeysockets/baileys v6.7.23
-      try {
-        addLog("info", "Attempting a dynamic live WhatsApp Web version fetch safely... (once per session)", "whatsapp");
-        const res = await fetch("https://web.whatsapp.com/sw.js", {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-          }
-        });
-        if (res.ok) {
-          const text = await res.text();
-          const regex = /"client_revision":\s*(\d+)/;
-          const match = text.match(regex);
-          if (match && match[1]) {
-            const clientRev = parseInt(match[1], 10);
-            activeWaVersion = [2, 3000, clientRev];
-            addLog("info", `Successfully fetched active live WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
-          } else {
-            // Fallback to searching home page if sw.js is updated differently
-            const homeRes = await fetch("https://web.whatsapp.com/", {
-              headers: {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-              }
-            });
-            if (homeRes.ok) {
-              const homeText = await homeRes.text();
-              const revMatch = homeText.match(/client_revision":\s*(\d+)/);
-              if (revMatch && revMatch[1]) {
-                const clientRev = parseInt(revMatch[1], 10);
-                activeWaVersion = [2, 3000, clientRev];
-                addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${activeWaVersion.join(".")}`, "whatsapp");
-              } else {
-                addLog("warn", `Regex client_revision matching failed. Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
-              }
-            } else {
-              addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
-            }
-          }
-        } else {
-          addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback: ${activeWaVersion.join(".")}`, "whatsapp");
-        }
-      } catch (err: any) {
-        addLog("warn", `Could not dynamically fetch WhatsApp Web version: ${err.message}. Defaulting to robust fallback: ${activeWaVersion.join(".")}`, "whatsapp");
-      }
-    } else {
-      addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
-    }
-
     whatsappClient = makeWASocket({
-      version: activeWaVersion,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
       connectTimeoutMs: 60000,
-      browser: Browsers.macOS("Desktop"),
     });
 
     whatsappClient.ev.on("creds.update", saveCreds);
@@ -119,9 +67,7 @@ async function initializeWhatsAppWebClient() {
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode || (lastDisconnect?.error as any)?.statusCode;
         const errMessage = lastDisconnect?.error?.message || "Connection timed out or closed.";
-        const isAuthFailure = statusCode === DisconnectReason.loggedOut;
-        const shouldReconnect = !isAuthFailure;
-        
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         whatsappClientStatus = "DISCONNECTED";
         whatsappQrCodeDataUrl = null;
         
@@ -130,24 +76,6 @@ async function initializeWhatsAppWebClient() {
           whatsappConnectionError = `Disconnected (statusCode: ${statusCode || "unknown"}): ${errMessage}`;
         } else {
           whatsappConnectionError = null;
-        }
-
-        if (isAuthFailure) {
-          addLog("error", `WhatsApp credentials/session revoked (statusCode: ${statusCode}). Purging stale auth folder so a fresh QR code can be generated.`, "whatsapp");
-          try {
-            const authPath = path.join(process.cwd(), ".baileys_auth");
-            if (fs.existsSync(authPath)) {
-              fs.rmSync(authPath, { recursive: true, force: true });
-            }
-          } catch (delErr: any) {
-            addLog("warn", `Could not clear stale Baileys session folder: ${delErr.message}`, "whatsapp");
-          }
-          whatsappClient = null;
-          addLog("info", `Restarting WhatsApp initialization in 3 seconds to prompt a fresh login QR...`, "whatsapp");
-          setTimeout(() => {
-            initializeWhatsAppWebClient();
-          }, 3000);
-          return;
         }
         
         if (shouldReconnect) {
@@ -165,28 +93,6 @@ async function initializeWhatsAppWebClient() {
         whatsappClientStatus = "CONNECTED";
         whatsappQrCodeDataUrl = null;
         addLog("success", "SaaMedia WhatsApp Bot is online and CONNECTED! Ready to send alerts.", "whatsapp");
-        
-        // Stagger the group discovery by 5 seconds to prevent early socket congestion/rejection (error 405)
-        setTimeout(async () => {
-          if (!whatsappClient || whatsappClientStatus !== "CONNECTED") return;
-          try {
-            addLog("info", "Connected! Querying active group chats to discover JIDs...", "whatsapp");
-            const groups = await whatsappClient.groupFetchAllParticipating();
-            const groupKeys = Object.keys(groups);
-            if (groupKeys.length > 0) {
-              addLog("info", `---------- DISCOVERED ACTIVE WHATSAPP GROUPS ----------`, "whatsapp");
-              for (const gId of groupKeys) {
-                const gMeta = groups[gId];
-                addLog("info", `Group ID (JID): "${gId}" | Group Name: "${gMeta.subject || "No Name"}"`, "whatsapp");
-              }
-              addLog("info", `-------------------------------------------------------`, "whatsapp");
-            } else {
-              addLog("info", "No active WhatsApp groups discovered for this connected phone number.", "whatsapp");
-            }
-          } catch (gErr: any) {
-            addLog("warn", `Could not automatically fetch listed group JIDs: ${gErr.message}`, "whatsapp");
-          }
-        }, 5000);
       }
     });
 
@@ -203,8 +109,11 @@ const DB_PATH = path.join(process.cwd(), "db.json");
 
 // Define Default Values
 const DEFAULT_SOURCES: NewsSource[] = [
-  { id: "dailytrust-home", name: "DailyTrust Home", url: "https://dailytrust.com/", type: "National", feedUrl: "https://dailytrust.com/", enabled: true },
-  { id: "tvcnews-home", name: "TVC News Home", url: "https://www.tvcnews.tv/", type: "Politics", feedUrl: "https://www.tvcnews.tv/", enabled: true }
+  { id: "vanguardngr-national", name: "Vanguard National News", url: "https://www.vanguardngr.com/category/national-news/", type: "National", feedUrl: "https://www.vanguardngr.com/category/national-news/", enabled: true },
+  { id: "vanguardngr-politics", name: "Vanguard Politics", url: "https://www.vanguardngr.com/category/politics/", type: "Politics", feedUrl: "https://www.vanguardngr.com/category/politics/", enabled: true },
+  { id: "tvcnews-politics", name: "TVC News Politics", url: "https://www.tvcnews.tv/category/politics-news/", type: "Politics", feedUrl: "https://www.tvcnews.tv/category/politics-news/", enabled: true },
+  { id: "dailytrust-news", name: "DailyTrust News", url: "https://dailytrust.com/topics/news/", type: "National", feedUrl: "https://dailytrust.com/topics/news/", enabled: true },
+  { id: "dailytrust-politics", name: "DailyTrust Politics", url: "https://dailytrust.com/topics/politics/", type: "Politics", feedUrl: "https://dailytrust.com/topics/politics/", enabled: true }
 ];
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -242,27 +151,18 @@ function loadDb() {
     if (!parsed.sources) {
       parsed.sources = DEFAULT_SOURCES;
     } else {
-      // Automatic migration: If the database contains old sources (e.g. punchng, vanguardngr, subpaths), replace with new default sources
+      // Automatic migration: If the database contains old sources (e.g. punchng, arisetv, channelstv), replace with new category sources
       const containsOldSources = parsed.sources.some((s: any) => 
         s && (
           s.id === "punchng" || 
           s.id === "arisetv" || 
           s.id === "nairametrics" || 
           s.id === "businessdayng" || 
-          s.id === "vanguardngr-national" ||
-          s.id === "vanguardngr-politics" ||
-          s.id === "tvcnews-politics" ||
-          s.id === "dailytrust-news" ||
-          s.id === "dailytrust-politics" ||
           (s.id && typeof s.id === "string" && s.id.includes("channelstv")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("vanguardngr")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("topics/news")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("topics/politics")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("category/politics-news")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("vanguardngr")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("topics/news")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("topics/politics")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("category/politics-news"))
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("punchng")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("nairametrics")) ||
+          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("channelstv")) ||
+          (s.feedUrl && s.feedUrl === "https://www.channelstv.com/feed/")
         )
       );
       if (containsOldSources || parsed.sources.length !== DEFAULT_SOURCES.length) {
@@ -555,32 +455,8 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
     }
 
     try {
-      let recipientInput = config.whatsappRecipient.trim();
-      let recipientId = recipientInput.replace(/\+/g, "");
-
-      // Check if recipient is a group invite URL or has chat.whatsapp.com
-      if (recipientInput.includes("chat.whatsapp.com")) {
-        try {
-          const parts = recipientInput.split("/");
-          const lastPart = parts[parts.length - 1].split("?")[0].trim();
-          addLog("info", `WhatsApp Recipient detected as Invite Link. Extracted code: "${lastPart}". Resolving JID...`, "whatsapp");
-          const inviteInfo = await whatsappClient.groupGetInviteInfo(lastPart);
-          if (inviteInfo && inviteInfo.id) {
-            recipientId = inviteInfo.id;
-            addLog("success", `Resolved Invite Link directly! Group Name: "${inviteInfo.subject}" | JID: "${recipientId}"`, "whatsapp");
-          } else {
-            throw new Error(`Failed to extract JID from invite metadata.`);
-          }
-        } catch (inviteErr: any) {
-          addLog("warn", `Could not automatically resolve invite link via Baileys API: ${inviteErr.message}`, "whatsapp");
-          // Fallback to extraction from parts just in case
-          const parts = recipientInput.split("/");
-          recipientId = parts[parts.length - 1].split("?")[0].trim();
-          if (!recipientId.endsWith("@g.us")) {
-            recipientId = `${recipientId}@g.us`;
-          }
-        }
-      } else if (!recipientId.endsWith("@s.whatsapp.net") && !recipientId.endsWith("@g.us")) {
+      let recipientId = config.whatsappRecipient.trim().replace(/\+/g, "");
+      if (!recipientId.endsWith("@s.whatsapp.net") && !recipientId.endsWith("@g.us")) {
         if (recipientId.includes("-") || recipientId.length > 15) {
           recipientId = `${recipientId}@g.us`;
         } else {
@@ -652,236 +528,6 @@ async function getGeminiClient(): Promise<GoogleGenAI> {
       }
     }
   });
-}
-
-// Helper functions to identify metadata and adverts to discard during scraping
-
-const monthRegex = /(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)/i;
-
-function isDatePattern(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (!clean) return false;
-
-  // 1. Check relative date e.g. "2 hours ago", "1 day ago", "20 mins ago", "just now"
-  if (/\b\d+\s*(?:second|sec|minute|min|hour|hr|day|week|month|year)s?\s+ago\b/i.test(clean)) return true;
-  if (/^\s*just\s+now\s*$/i.test(clean)) return true;
-
-  // 2. Check absolute month day year patterns e.g. "June 20, 2026", "20 June 2026", "Jun 20, 2026"
-  if (monthRegex.test(clean) && (/\b\d{4}\b/.test(clean) || /\b\d{1,2}\b/.test(clean))) {
-    if (clean.length < 80) return true;
-  }
-
-  // 3. Check standard numeric dates e.g. "20/06/2026" or "2026-06-20", "20-06-2026"
-  if (/\b\d{1,2}[\/\-–]\d{1,2}[\/\-–]\d{2,4}\b/.test(clean)) {
-    if (clean.length < 40) return true;
-  }
-  if (/\b\d{4}[\/\-–]\d{1,2}[\/\-–]\d{1,2}\b/.test(clean)) {
-    if (clean.length < 40) return true;
-  }
-
-  // 4. Check prefixed dates e.g. "published on...", "posted on...", "updated on..."
-  if (/^(?:published|posted|updated|date|time|on)\s*:/i.test(clean)) return true;
-  if (/^(?:published|posted|updated)\s+on\b/i.test(clean)) return true;
-
-  return false;
-}
-
-function isAuthorPattern(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (!clean) return false;
-
-  // Exact matching or presence of author/publisher names
-  if (clean.includes("bytvcnews") || clean.includes("by tvcnews") || clean.includes("by tvc news")) return true;
-  if (clean.includes("by daily trust") || clean.includes("by dailytrust")) return true;
-
-  // Lines starting with "by " (excluding general long sentences)
-  if (/^\s*by\s+/i.test(clean)) {
-    if (clean.length < 100) return true;
-  }
-
-  // Prefixed author markers
-  if (/^\s*(?:author|writer|reporter|journalist|editor)\s*:/i.test(clean)) return true;
-
-  return false;
-}
-
-function isAdvertOrUpdateNewsPattern(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (!clean) return false;
-
-  if (clean.includes("advert") || clean.includes("update news")) {
-    return true;
-  }
-  return false;
-}
-
-// Helper to clean scraped news content from DailyTrust or TVC News sources to avoid Google adverts, breadcrumbs, related news, and promotional text.
-function cleanScrapedArticleText(rawText: string, sourceName: string): string {
-  if (!rawText) return "";
-
-  // Split content by paragraphs or lines to filter them
-  const paragraphs = rawText.split(/\n\n+/);
-  const cleanedParagraphs: string[] = [];
-
-  const lowerSource = (sourceName || "").toLowerCase();
-  const isDailyTrustOrTvc = lowerSource.includes("dailytrust") || lowerSource.includes("daily trust") || lowerSource.includes("tvc");
-
-  for (let p of paragraphs) {
-    p = p.trim();
-    if (!p) continue;
-
-    const lowerP = p.toLowerCase();
-
-    // If DailyTrust or TVC News, apply stricter filtering of target advert lines/blocks
-    if (isDailyTrustOrTvc) {
-      // 1. Google Ads and tag managers JavaScript blocks / code snippets
-      if (
-        lowerP.includes("googletag") ||
-        lowerP.includes("window.googletag") ||
-        lowerP.includes("defineslot") ||
-        lowerP.includes("pubads") ||
-        lowerP.includes("enablesinglerequest") ||
-        lowerP.includes("enableservices") ||
-        lowerP.includes("div-gpt-ad") ||
-        lowerP.includes("dailytrust.com_300_600") ||
-        lowerP.includes("dailytrust_article_bottom")
-      ) {
-        continue;
-      }
-
-      // 2. Specific premium domain brokerage ads
-      if (
-        lowerP.includes("invest ₦2.5 million") ||
-        lowerP.includes("premium domains") ||
-        lowerP.includes("profit about ₦17") ||
-        lowerP.includes("earnings paid in us dollars") ||
-        lowerP.includes("rather than wonder") ||
-        lowerP.includes("click here to find out")
-      ) {
-        continue;
-      }
-
-      // 3. WhatsApp Community prompt
-      if (
-        lowerP.includes("daily trust whatsapp community") ||
-        lowerP.includes("join daily trust whatsapp") ||
-        lowerP.includes("quick access to news and happenings")
-      ) {
-        continue;
-      }
-
-      // 4. Exclude author name and dates of published article/news for DailyTrust/TVC Sources
-      if (isAuthorPattern(p) || isDatePattern(p)) {
-        continue;
-      }
-
-      // 5. Exclude words/phrases like ADVERT, UPDATE NEWS
-      if (isAdvertOrUpdateNewsPattern(p)) {
-        continue;
-      }
-    }
-
-    // 6. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
-    const isBreadcrumb =
-      /^\s*home\s*[>»/|]/i.test(p) ||
-      (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
-      /^\s*home\s+topics\s+/i.test(p) ||
-      /^\s*home\s+news\s+/i.test(p);
-    if (isBreadcrumb) {
-      continue;
-    }
-
-    // 7. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
-    if (
-      lowerP === "advertisement" ||
-      lowerP === "also read" ||
-      lowerP === "read more" ||
-      lowerP === "sponsor ad" ||
-      lowerP === "advert" ||
-      lowerP === "advert –>" ||
-      lowerP === "–>" ||
-      lowerP === "-->"
-    ) {
-      continue;
-    }
-
-    // 8. Exclude Inline Related Posts or News/Articles link blocks
-    if (
-      lowerP.startsWith("also read") ||
-      lowerP.startsWith("read also") ||
-      lowerP.startsWith("read more") ||
-      lowerP.startsWith("advertisement") ||
-      lowerP.startsWith("related news") ||
-      lowerP.startsWith("related post") ||
-      lowerP.startsWith("related article") ||
-      lowerP.startsWith("inline related") ||
-      /related:\s/i.test(p) ||
-      /\[related\]/i.test(p) ||
-      lowerP.includes("inline related post") ||
-      lowerP.includes("inline related news") ||
-      lowerP.includes("inline related article")
-    ) {
-      continue;
-    }
-
-    // Also parse line-by-line inside paragraphs to be extremely precise
-    const lines = p.split("\n");
-    const cleanedLines: string[] = [];
-    for (let line of lines) {
-      line = line.trim();
-      const lowerLine = line.toLowerCase();
-      if (!line) continue;
-
-      if (isDailyTrustOrTvc) {
-        if (
-          lowerLine.includes("googletag") ||
-          lowerLine.includes("div-gpt-ad") ||
-          lowerLine.includes("premium domains") ||
-          lowerLine.includes("invest ₦2.5 million") ||
-          lowerLine.includes("daily trust whatsapp community") ||
-          lowerLine.includes("sponsor ad") ||
-          lowerLine.includes("advertisement") ||
-          lowerLine.includes("advert –>") ||
-          lowerLine === "–>" ||
-          lowerLine === "-->" ||
-          isAuthorPattern(line) ||
-          isDatePattern(line) ||
-          isAdvertOrUpdateNewsPattern(line)
-        ) {
-          continue;
-        }
-      }
-
-      if (
-        lowerLine.startsWith("also read") ||
-        lowerLine.startsWith("read also") ||
-        lowerLine.startsWith("read more") ||
-        lowerLine.startsWith("related:\s") ||
-        /^\s*home\s*[>»/|]/i.test(line)
-      ) {
-        continue;
-      }
-
-      cleanedLines.push(line);
-    }
-
-    if (cleanedLines.length > 0) {
-      cleanedParagraphs.push(cleanedLines.join("\n"));
-    }
-  }
-
-  let result = cleanedParagraphs.filter(Boolean).join("\n\n").trim();
-
-  // Strip additional hardcoded blocks
-  result = result
-    .replace(/googletag\.cmd\.push\(function\(\)[\s\S]*?\}\);/gi, "")
-    .replace(/window\.googletag[\s\S]*?\}\);/gi, "")
-    .replace(/ADVERT\s*–>[\s\S]*?–>/gi, "")
-    .replace(/ADVERTISEMENT/gi, "")
-    .replace(/ALSO READ/gi, "")
-    .replace(/READ MORE/gi, "");
-
-  return result;
 }
 
 // Web Crawler helper to fetch raw HTML of original article and extract full text plus any image resources
@@ -1018,8 +664,9 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       .join("\n\n")
       .trim();
 
-    // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, etc.
-    cleanText = cleanScrapedArticleText(cleanText, sourceName);
+    if (cleanText.length > 10000) {
+      cleanText = cleanText.substring(0, 10000) + "... [truncated]";
+    }
 
     addLog("success", `Crawled original webpage successfully. Extracted ${cleanText.length} characters, featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
 
@@ -1087,7 +734,6 @@ INSTRUCTIONS:
 2. Write a Professional Short Summary (1-2 sentences) of the core development.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
 4. Write a highly thorough, complete full-length news story, preserving the EXACT original separation of paragraphs in the crawled webpage. Each individual paragraph in the input text MUST be written as its own separate HTML paragraph (using a separate <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'> tag). Do NOT combine, merge, or condense multiple paragraphs into one giant block; instead, articulate and arrange them sequentially matching the natural flow of the news source report. Include every possible detail (descriptions, data, quotes, and timelines).
-   - UNLIMITED LENGTH MANDATE: You MUST make the news story unlimited in character or word count. No matter how long the original news story or article is, it must be fully translated/recreated without any truncating, shortening, condensing, summarizing, or abbreviation. Every single original paragraph, fact, direct/indirect quote, background context, sub-details, and list item must be preserved at full narrative length. Output the complete unabridged narrative.
    - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
    - You MUST embed the elected Featured Image at the absolute top of the article contentHtml.
@@ -1115,7 +761,6 @@ INSTRUCTIONS:
      - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
      
    - Do NOT append any news source partner credits, back links, reference footers, or footnote/citation blocks at the bottom of the article. Focus entirely on the human-like editorial storytelling text.
-   - STRICTOR EXCLUSIONS: You MUST absolutely avoid, skip, and delete any Google adverts, window.googletag script tags or plain code left-overs, premium domains investing advertisements, WhatsApp community prompts, DailyTrust or TVC News source breadcrumbs, "ADVERTISEMENT", "ALSO READ", "READ MORE" labels/headlines, and any inline related posts, news, or articles links/sections from the news content.
 
 5. Decide which URL represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
 
