@@ -204,7 +204,7 @@ export default function App() {
       if (artData) setArticles(artData);
       if (srcData) setSources(srcData);
       if (logData) setLogs(logData);
-      if (cfgData) setConfig(cfgData);
+      if (cfgData) setConfig(prev => ({ ...prev, ...cfgData }));
       if (statData) setStats(statData);
 
       // If absolutely everything failed, notify about backend offline state (unless background poll)
@@ -1759,6 +1759,15 @@ export default function App() {
                             />
                             <p className="text-[10px] text-slate-455 mt-1 font-mono">Use channel public link (e.g. <code>@my_channel</code>) or ID (e.g. <code>-100XXXXXXXXXX</code>). Bot must be an administrator.</p>
                           </div>
+                        </div>
+
+                        <div className="bg-[#1C2333]/90 border border-cyan-500/20 rounded-xl p-3.5 space-y-1">
+                          <div className="text-[11px] text-cyan-400 font-bold font-mono tracking-wider flex items-center gap-1.5 uppercase">
+                            📢 Crucial Setup Step
+                          </div>
+                          <p className="text-[10.5px] text-slate-300 leading-relaxed font-mono">
+                            For Telegram to work, you <strong>MUST add your Bot as an Administrator</strong> to your channel or group and allow it to <strong>Post Messages</strong>. If the bot is not an admin, Telegram will reject incoming alerts.
+                          </p>
                         </div>
                       </motion.div>
                     )}
