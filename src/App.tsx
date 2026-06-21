@@ -212,10 +212,10 @@ export default function App() {
         if (!isBackground) {
           triggerAlert("error", "SaaMedia News automation backend appears offline. Re-establishing connection...");
         }
-        console.error("API Sourcing Fetch failure, connecting offline standard config...");
+        console.warn("API Sourcing Fetch is waiting for backend ready state...");
       }
     } catch (e) {
-      console.error("Critical error in fetchData queue orchestration:", e);
+      console.warn("Retrying fetchData queue orchestration...", e);
     } finally {
       setLoading(false);
     }
