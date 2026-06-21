@@ -45,48 +45,55 @@ async function initializeWhatsAppWebClient() {
 
     // Cache the fetched version globally to avoid repeating fetch queries and hitting 429 rate limit
     if (!activeWaVersion) {
-      activeWaVersion = [2, 3000, 1023223821]; // Standard robust default of @whiskeysockets/baileys v6.7.23
+      activeWaVersion = [2, 3000, 1041848672]; // Modern robust working fallback default of @whiskeysockets/baileys
       try {
-        addLog("info", "Attempting a dynamic live WhatsApp Web version fetch safely... (once per session)", "whatsapp");
-        const res = await fetch("https://web.whatsapp.com/sw.js", {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-          }
-        });
-        if (res.ok) {
-          const text = await res.text();
-          const regex = /"client_revision":\s*(\d+)/;
-          const match = text.match(regex);
-          if (match && match[1]) {
-            const clientRev = parseInt(match[1], 10);
-            activeWaVersion = [2, 3000, clientRev];
-            addLog("info", `Successfully fetched active live WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
-          } else {
-            // Fallback to searching home page if sw.js is updated differently
-            const homeRes = await fetch("https://web.whatsapp.com/", {
-              headers: {
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-              }
-            });
-            if (homeRes.ok) {
-              const homeText = await homeRes.text();
-              const revMatch = homeText.match(/client_revision":\s*(\d+)/);
-              if (revMatch && revMatch[1]) {
-                const clientRev = parseInt(revMatch[1], 10);
-                activeWaVersion = [2, 3000, clientRev];
-                addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${activeWaVersion.join(".")}`, "whatsapp");
-              } else {
-                addLog("warn", `Regex client_revision matching failed. Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
-              }
-            } else {
-              addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
-            }
-          }
-        } else {
-          addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback: ${activeWaVersion.join(".")}`, "whatsapp");
-        }
+        addLog("info", "Attempting a dynamic live WhatsApp Web version fetch safely via Baileys API... (once per session)", "whatsapp");
+        const { version, isLatest } = await fetchLatestWaWebVersion({});
+        activeWaVersion = version;
+        addLog("info", `Successfully fetched active live WhatsApp Web version via Baileys API: ${activeWaVersion.join(".")}. Is latest: ${isLatest}`, "whatsapp");
       } catch (err: any) {
-        addLog("warn", `Could not dynamically fetch WhatsApp Web version: ${err.message}. Defaulting to robust fallback: ${activeWaVersion.join(".")}`, "whatsapp");
+        addLog("warn", `Baileys fetchLatestWaWebVersion failed: ${err.message}. Trying custom fetch...`, "whatsapp");
+        try {
+          const res = await fetch("https://web.whatsapp.com/sw.js", {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            }
+          });
+          if (res.ok) {
+            const text = await res.text();
+            const regex = /"client_revision":\s*(\d+)/;
+            const match = text.match(regex);
+            if (match && match[1]) {
+              const clientRev = parseInt(match[1], 10);
+              activeWaVersion = [2, 3000, clientRev];
+              addLog("info", `Successfully fetched active live WhatsApp Web version via sw.js: ${activeWaVersion.join(".")}`, "whatsapp");
+            } else {
+              // Fallback to searching home page if sw.js is updated differently
+              const homeRes = await fetch("https://web.whatsapp.com/", {
+                headers: {
+                  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                }
+              });
+              if (homeRes.ok) {
+                const homeText = await homeRes.text();
+                const revMatch = homeText.match(/client_revision":\s*(\d+)/);
+                if (revMatch && revMatch[1]) {
+                  const clientRev = parseInt(revMatch[1], 10);
+                  activeWaVersion = [2, 3000, clientRev];
+                  addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${activeWaVersion.join(".")}`, "whatsapp");
+                } else {
+                  addLog("warn", `Regex client_revision matching failed. Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
+                }
+              } else {
+                addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
+              }
+            }
+          } else {
+            addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback: ${activeWaVersion.join(".")}`, "whatsapp");
+          }
+        } catch (subErr: any) {
+          addLog("warn", `Could not dynamically fetch WhatsApp Web version via custom fallback: ${subErr.message}. Defaulting to robust fallback: ${activeWaVersion.join(".")}`, "whatsapp");
+        }
       }
     } else {
       addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
@@ -709,7 +716,39 @@ function isAdvertOrUpdateNewsPattern(text: string): boolean {
   const clean = text.trim().toLowerCase();
   if (!clean) return false;
 
-  if (clean.includes("advert") || clean.includes("update news")) {
+  if (
+    clean.includes("advert") || 
+    clean.includes("update news") || 
+    clean.includes("news update")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isHeaderExcludedPhrase(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  return (
+    clean === "top news" ||
+    clean === "latest nigeria news" ||
+    clean === "entertainment latest nigeria news" ||
+    clean === "sports top news" ||
+    clean === "health top news" ||
+    clean === "politics top news"
+  );
+}
+
+function isScriptRemnant(text: string): boolean {
+  const clean = text.trim().toLowerCase();
+  if (
+    clean.includes("});") ||
+    clean.includes("});") ||
+    clean === "});" ||
+    clean === "});" ||
+    clean.includes("googletag") ||
+    clean.includes("cmd.push") ||
+    clean.includes("window.googletag")
+  ) {
     return true;
   }
   return false;
@@ -731,6 +770,11 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
     if (!p) continue;
 
     const lowerP = p.toLowerCase();
+
+    // Global exclusions for any source (e.g. Header headings, leak script remnants, advert blocks)
+    if (isHeaderExcludedPhrase(p) || isScriptRemnant(p) || isAdvertOrUpdateNewsPattern(p)) {
+      continue;
+    }
 
     // If DailyTrust or TVC News, apply stricter filtering of target advert lines/blocks
     if (isDailyTrustOrTvc) {
@@ -831,6 +875,11 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       line = line.trim();
       const lowerLine = line.toLowerCase();
       if (!line) continue;
+
+      // Global line exclusions for any source
+      if (isHeaderExcludedPhrase(line) || isScriptRemnant(line) || isAdvertOrUpdateNewsPattern(line)) {
+        continue;
+      }
 
       if (isDailyTrustOrTvc) {
         if (
