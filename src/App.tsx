@@ -62,10 +62,7 @@ export default function App() {
     whatsappApiKey: "",
     schedulerIntervalMins: 60,
     schedulerEnabled: true,
-    apiKeyOverride: "",
-    telegramToken: "",
-    telegramChatId: "",
-    telegramEnabled: false
+    apiKeyOverride: ""
   });
   
   // Stats summary state
@@ -84,19 +81,13 @@ export default function App() {
     qrCode: string | null;
     error: string | null;
     recipient: string;
-    pairingCode: string | null;
-    pairingPhone: string | null;
   }>({
     status: 'DISCONNECTED',
     qrCode: null,
     error: null,
-    recipient: '',
-    pairingCode: null,
-    pairingPhone: null
+    recipient: ''
   });
   const [waLoading, setWaLoading] = useState(false);
-  const [pairingPhoneInput, setPairingPhoneInput] = useState("");
-  const [pairingLoading, setPairingLoading] = useState(false);
 
   // UI Interactive States
   const [loading, setLoading] = useState(false);
@@ -124,35 +115,6 @@ export default function App() {
     setTimeout(() => {
       setAlert(null);
     }, 4500);
-  };
-
-  const handleRequestPairingCode = async () => {
-    if (!pairingPhoneInput.trim()) {
-      triggerAlert("error", "Please input a valid phone number with country code.");
-      return;
-    }
-    setPairingLoading(true);
-    try {
-      const res = await fetch("/api/whatsapp/pairing-code", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phoneNumber: pairingPhoneInput })
-      });
-      if (res.ok) {
-        triggerAlert("success", "Handshake requested! Fetching pairing code from Baileys engine...");
-        // Poll status immediately
-        setTimeout(fetchWaStatus, 2000);
-        setTimeout(fetchWaStatus, 4000);
-        setTimeout(fetchWaStatus, 6000);
-      } else {
-        const errJson = await res.json();
-        triggerAlert("error", errJson.error || "Failed to trigger pairing handshake.");
-      }
-    } catch (err) {
-      triggerAlert("error", "Error connecting to service container.");
-    } finally {
-      setPairingLoading(false);
-    }
   };
 
   // FETCH CORE DATA FROM BACKEND RELIABLY
@@ -1118,36 +1080,10 @@ export default function App() {
                             {article.summary}
                           </p>
 
-                          <div className="flex items-center gap-4 text-xs text-slate-400 pt-1.5 font-mono flex-wrap">
+                          <div className="flex items-center gap-4 text-xs text-slate-400 pt-1.5 font-mono">
                             <span className="flex items-center gap-1.5">
-                              {article.whatsappError ? (
-                                <span className="flex items-center gap-1 text-rose-450" title={article.whatsappError}>
-                                  ⚠️ WhatsApp Fail
-                                </span>
-                              ) : (
-                                <span className="flex items-center gap-1 text-emerald-400">
-                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> WhatsApp Sent
-                                </span>
-                              )}
+                              <CheckCircle2 className="h-3.5 w-3.5 text-green-400" /> WhatsApp Notified
                             </span>
-                            
-                            {(config.telegramEnabled || article.telegramSent) && (
-                              <span className="flex items-center gap-1.5">
-                                {article.telegramSent ? (
-                                  <span className="flex items-center gap-1 text-cyan-400">
-                                    <Send className="h-3.5 w-3.5 text-cyan-450" /> Telegram Sent
-                                  </span>
-                                ) : article.telegramError ? (
-                                  <span className="flex items-center gap-1 text-rose-450" title={article.telegramError}>
-                                    ⚠️ Telegram Fail
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-500">
-                                    ✈️ Telegram Pending
-                                  </span>
-                                )}
-                              </span>
-                            )}
                             <span>Published {article.publishedAt ? new Date(article.publishedAt).toLocaleString() : ""}</span>
                           </div>
                         </div>
@@ -1661,103 +1597,6 @@ export default function App() {
                                 {waLoading ? "Booting Driver..." : "🔄 Refresh QR Code or Force Restart"}
                               </button>
                             </div>
-
-                            <div className="pt-3.5 border-t border-slate-800 space-y-3">
-                              <span className="text-[11px] text-amber-500 font-mono uppercase bg-amber-500/10 px-2.5 py-1 rounded-full font-semibold">Alternative: Link with Phone Number</span>
-                              
-                              <p className="text-[11px] text-slate-400 leading-relaxed font-mono">
-                                Type your WhatsApp phone number (with country code, e.g. <code className="text-amber-400 bg-black/35 px-1 py-0.5 rounded">2348031234567</code>) to request a temporary 8-digit connection code directly!
-                              </p>
-
-                              <div className="flex gap-2">
-                                <input
-                                  type="text"
-                                  placeholder="e.g., 234803XXXXXXXX"
-                                  value={pairingPhoneInput}
-                                  onChange={(e) => setPairingPhoneInput(e.target.value)}
-                                  className="flex-1 text-xs font-mono bg-[#162033] border border-slate-700 text-slate-100 rounded-lg px-3 py-2 focus:border-amber-500 focus:outline-none"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={handleRequestPairingCode}
-                                  disabled={pairingLoading}
-                                  className="bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 text-xs font-bold font-mono transition-colors"
-                                >
-                                  {pairingLoading ? "Fetching..." : "Request Code"}
-                                </button>
-                              </div>
-
-                              {waStatus.pairingCode && (
-                                <div className="bg-[#1C2C24] border border-emerald-800/80 rounded-xl p-3 text-center space-y-1.5">
-                                  <div className="text-[10px] text-emerald-400 uppercase font-bold font-mono tracking-wider">Your Pairing Code</div>
-                                  <div className="text-2xl font-extrabold tracking-widest font-mono text-emerald-300 select-all bg-[#09100a]/95 py-2 rounded-lg border border-emerald-700/30">
-                                    {waStatus.pairingCode}
-                                  </div>
-                                  <p className="text-[10px] text-emerald-400 font-mono leading-relaxed">
-                                    Enter this code on your WhatsApp mobile app under <strong>Linked Devices &rarr; Link with Phone Number</strong>.
-                                  </p>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      </motion.div>
-                    )}
-                  </div>
-
-                  {/* TELEGRAM BOT NOTIFIER CONTROL */}
-                  <div className="bg-[#162033]/90 p-6 rounded-2xl border border-slate-700/50 space-y-4">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest flex items-center gap-2 text-cyan-400 border-b border-slate-800/80 pb-2.5 font-display">
-                      <Send className="h-4 w-4 text-cyan-400" /> Telegram Alternative Dispatcher
-                    </h3>
-
-                    <div className="flex items-center justify-between pb-1">
-                      <div className="space-y-0.5">
-                        <span className="text-xs font-semibold text-slate-200">Enable Parallel Telegram Broadcast</span>
-                        <p className="text-[10.5px] text-slate-450 leading-relaxed">
-                          SaaMedia will automatically forward newly published posts to Telegram as a reliable backup/alternative.
-                        </p>
-                      </div>
-                      <label className="relative inline-flex items-center cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={config.telegramEnabled || false}
-                          onChange={(e) => setConfig({ ...config, telegramEnabled: e.target.checked })}
-                          className="sr-only peer"
-                        />
-                        <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
-                      </label>
-                    </div>
-
-                    {config.telegramEnabled && (
-                      <motion.div
-                        initial={{ opacity: 0, height: 0 }}
-                        animate={{ opacity: 1, height: "auto" }}
-                        className="space-y-4 pt-3 border-t border-slate-800/60"
-                      >
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div>
-                            <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">Telegram Bot Token *</label>
-                            <input
-                              type="text"
-                              value={config.telegramToken || ""}
-                              onChange={(e) => setConfig({ ...config, telegramToken: e.target.value })}
-                              placeholder="e.g., 123456789:ABCDefghIjkLmNoP"
-                              className="w-full text-xs font-mono bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                            />
-                            <p className="text-[10px] text-slate-450 mt-1 font-mono">Create Bot via Telegram <strong>@BotFather</strong> to instantly acquire a token.</p>
-                          </div>
-
-                          <div>
-                            <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">Telegram Share Chat/Channel ID *</label>
-                            <input
-                              type="text"
-                              value={config.telegramChatId || ""}
-                              onChange={(e) => setConfig({ ...config, telegramChatId: e.target.value })}
-                              placeholder="e.g., @saamedia_alerts or channel ID"
-                              className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
-                            />
-                            <p className="text-[10px] text-slate-455 mt-1 font-mono">Use channel public link (e.g. <code>@my_channel</code>) or ID (e.g. <code>-100XXXXXXXXXX</code>). Bot must be an administrator.</p>
                           </div>
                         </div>
                       </motion.div>

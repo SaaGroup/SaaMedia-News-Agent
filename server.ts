@@ -4,7 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { Article, NewsSource, SystemLog, SystemConfig } from "./src/types.ts";
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion, Browsers } from "@whiskeysockets/baileys";
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 
@@ -27,9 +27,6 @@ let whatsappClient: any = null;
 let whatsappClientStatus: "DISCONNECTED" | "AUTHENTICATING" | "QR_RECEIVED" | "CONNECTED" | "ERROR" = "DISCONNECTED";
 let whatsappQrCodeDataUrl: string | null = null;
 let whatsappConnectionError: string | null = null;
-let activeWaVersion: any = null; // Memory cache to prevent 429 blocks during reconnect loops
-let whatsappPairingCode: string | null = null;
-let whatsappPairingPhone: string | null = null;
 
 async function initializeWhatsAppWebClient() {
   if (whatsappClient) {
@@ -45,88 +42,25 @@ async function initializeWhatsAppWebClient() {
   try {
     const { state, saveCreds } = await useMultiFileAuthState(path.join(process.cwd(), ".baileys_auth"));
 
-    // Cache the fetched version globally to avoid repeating fetch queries and hitting 429 rate limit
-    if (!activeWaVersion) {
-      activeWaVersion = [2, 3000, 1041848672]; // Modern robust working fallback default of @whiskeysockets/baileys
-      try {
-        addLog("info", "Attempting a dynamic live WhatsApp Web version fetch safely via Baileys API... (once per session)", "whatsapp");
-        const { version, isLatest } = await fetchLatestWaWebVersion({});
-        activeWaVersion = version;
-        addLog("info", `Successfully fetched active live WhatsApp Web version via Baileys API: ${activeWaVersion.join(".")}. Is latest: ${isLatest}`, "whatsapp");
-      } catch (err: any) {
-        addLog("warn", `Baileys fetchLatestWaWebVersion failed: ${err.message}. Trying custom fetch...`, "whatsapp");
-        try {
-          const res = await fetch("https://web.whatsapp.com/sw.js", {
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            }
-          });
-          if (res.ok) {
-            const text = await res.text();
-            const regex = /"client_revision":\s*(\d+)/;
-            const match = text.match(regex);
-            if (match && match[1]) {
-              const clientRev = parseInt(match[1], 10);
-              activeWaVersion = [2, 3000, clientRev];
-              addLog("info", `Successfully fetched active live WhatsApp Web version via sw.js: ${activeWaVersion.join(".")}`, "whatsapp");
-            } else {
-              // Fallback to searching home page if sw.js is updated differently
-              const homeRes = await fetch("https://web.whatsapp.com/", {
-                headers: {
-                  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                }
-              });
-              if (homeRes.ok) {
-                const homeText = await homeRes.text();
-                const revMatch = homeText.match(/client_revision":\s*(\d+)/);
-                if (revMatch && revMatch[1]) {
-                  const clientRev = parseInt(revMatch[1], 10);
-                  activeWaVersion = [2, 3000, clientRev];
-                  addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${activeWaVersion.join(".")}`, "whatsapp");
-                } else {
-                  addLog("warn", `Regex client_revision matching failed. Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
-                }
-              } else {
-                addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
-              }
-            }
-          } else {
-            addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback: ${activeWaVersion.join(".")}`, "whatsapp");
-          }
-        } catch (subErr: any) {
-          addLog("warn", `Could not dynamically fetch WhatsApp Web version via custom fallback: ${subErr.message}. Defaulting to robust fallback: ${activeWaVersion.join(".")}`, "whatsapp");
-        }
+    // Dynamically retrieve the latest WhatsApp Web version to bypass version 405 deprecations
+    let waVersion: any = [2, 3000, 1041748294];
+    try {
+      const { version: fetchedVersion } = await fetchLatestWaWebVersion({});
+      if (fetchedVersion && Array.isArray(fetchedVersion)) {
+        waVersion = fetchedVersion;
+        addLog("info", `Fetched latest active WhatsApp Web version: ${waVersion.join(".")}`, "whatsapp");
       }
-    } else {
-      addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
+    } catch (err: any) {
+      addLog("warn", `Could not dynamically fetch WhatsApp Web version: ${err.message}. Defaulting to fallback security version: ${waVersion.join(".")}`, "whatsapp");
     }
 
-    const usePairing = !!whatsappPairingPhone;
-
     whatsappClient = makeWASocket({
-      version: activeWaVersion,
+      version: waVersion,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
       connectTimeoutMs: 60000,
-      browser: ["Ubuntu", "Chrome", "20.0.04"],
     });
-
-    if (usePairing && !state.creds.registered) {
-      setTimeout(async () => {
-        try {
-          if (!whatsappClient) return;
-          addLog("info", `Requesting WhatsApp Web pairing code for phone number: ${whatsappPairingPhone} ...`, "whatsapp");
-          const code = await whatsappClient.requestPairingCode(whatsappPairingPhone);
-          whatsappPairingCode = code;
-          whatsappClientStatus = "QR_RECEIVED"; // Mark status so frontend displays the pairing UI
-          addLog("success", `WhatsApp Web pairing code generated successfully: ${code}`, "whatsapp");
-        } catch (err: any) {
-          whatsappConnectionError = `Failed to generate pairing code: ${err.message}`;
-          addLog("error", `Failed to request pairing code: ${err.message}`, "whatsapp");
-        }
-      }, 5000); // Wait 5s for network layer readiness
-    }
 
     whatsappClient.ev.on("creds.update", saveCreds);
 
@@ -146,9 +80,7 @@ async function initializeWhatsAppWebClient() {
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode || (lastDisconnect?.error as any)?.statusCode;
         const errMessage = lastDisconnect?.error?.message || "Connection timed out or closed.";
-        const isAuthFailure = statusCode === DisconnectReason.loggedOut;
-        const shouldReconnect = !isAuthFailure;
-        
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         whatsappClientStatus = "DISCONNECTED";
         whatsappQrCodeDataUrl = null;
         
@@ -157,24 +89,6 @@ async function initializeWhatsAppWebClient() {
           whatsappConnectionError = `Disconnected (statusCode: ${statusCode || "unknown"}): ${errMessage}`;
         } else {
           whatsappConnectionError = null;
-        }
-
-        if (isAuthFailure) {
-          addLog("error", `WhatsApp credentials/session revoked (statusCode: ${statusCode}). Purging stale auth folder so a fresh QR code can be generated.`, "whatsapp");
-          try {
-            const authPath = path.join(process.cwd(), ".baileys_auth");
-            if (fs.existsSync(authPath)) {
-              fs.rmSync(authPath, { recursive: true, force: true });
-            }
-          } catch (delErr: any) {
-            addLog("warn", `Could not clear stale Baileys session folder: ${delErr.message}`, "whatsapp");
-          }
-          whatsappClient = null;
-          addLog("info", `Restarting WhatsApp initialization in 3 seconds to prompt a fresh login QR...`, "whatsapp");
-          setTimeout(() => {
-            initializeWhatsAppWebClient();
-          }, 3000);
-          return;
         }
         
         if (shouldReconnect) {
@@ -191,31 +105,7 @@ async function initializeWhatsAppWebClient() {
       } else if (connection === "open") {
         whatsappClientStatus = "CONNECTED";
         whatsappQrCodeDataUrl = null;
-        whatsappPairingCode = null;
-        whatsappPairingPhone = null;
         addLog("success", "SaaMedia WhatsApp Bot is online and CONNECTED! Ready to send alerts.", "whatsapp");
-        
-        // Stagger the group discovery by 5 seconds to prevent early socket congestion/rejection (error 405)
-        setTimeout(async () => {
-          if (!whatsappClient || whatsappClientStatus !== "CONNECTED") return;
-          try {
-            addLog("info", "Connected! Querying active group chats to discover JIDs...", "whatsapp");
-            const groups = await whatsappClient.groupFetchAllParticipating();
-            const groupKeys = Object.keys(groups);
-            if (groupKeys.length > 0) {
-              addLog("info", `---------- DISCOVERED ACTIVE WHATSAPP GROUPS ----------`, "whatsapp");
-              for (const gId of groupKeys) {
-                const gMeta = groups[gId];
-                addLog("info", `Group ID (JID): "${gId}" | Group Name: "${gMeta.subject || "No Name"}"`, "whatsapp");
-              }
-              addLog("info", `-------------------------------------------------------`, "whatsapp");
-            } else {
-              addLog("info", "No active WhatsApp groups discovered for this connected phone number.", "whatsapp");
-            }
-          } catch (gErr: any) {
-            addLog("warn", `Could not automatically fetch listed group JIDs: ${gErr.message}`, "whatsapp");
-          }
-        }, 5000);
       }
     });
 
@@ -248,10 +138,7 @@ const DEFAULT_CONFIG: SystemConfig = {
   whatsappApiKey: "",
   schedulerIntervalMins: 180,
   schedulerEnabled: true,
-  apiKeyOverride: "",
-  telegramToken: "",
-  telegramChatId: "",
-  telegramEnabled: false
+  apiKeyOverride: ""
 };
 
 // Database Initialization Helper
@@ -522,48 +409,6 @@ async function wordpressPublishRest(config: SystemConfig, title: string, htmlCon
   return data.id ? String(data.id) : "success_rest";
 }
 
-// Telegram Notifier Implementation
-async function sendTelegramMessage(config: SystemConfig, body: string): Promise<boolean> {
-  if (!config.telegramEnabled) {
-    return false;
-  }
-  if (!config.telegramToken || !config.telegramChatId) {
-    addLog("warn", "Telegram alerts are enabled but Token or Chat ID is empty.", "system");
-    return false;
-  }
-
-  try {
-    addLog("info", `Attempting to send Telegram alert to Chat ID: ${config.telegramChatId}...`, "system");
-    // Convert *text* to bold for HTML parse_mode
-    const formattedText = body
-      .replace(/\*(.*?)\*/g, "<b>$1</b>")
-      .replace(/_(.*?)_/g, "<i>$1</i>");
-
-    const url = `https://api.telegram.com/bot${config.telegramToken}/sendMessage`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: config.telegramChatId,
-        text: formattedText,
-        parse_mode: "HTML"
-      })
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      addLog("error", `Telegram alert failed (status ${response.status}): ${errText}`, "system");
-      return false;
-    }
-
-    addLog("success", `Successfully delivered news alert to Telegram Chat ID: ${config.telegramChatId}`, "system");
-    return true;
-  } catch (err: any) {
-    addLog("error", `Telegram networking failure: ${err.message}`, "system");
-    return false;
-  }
-}
-
 // WhatsApp Notifier Implementation
 async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<boolean> {
   if (config.whatsappGateway === "mock") {
@@ -629,32 +474,8 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
     }
 
     try {
-      let recipientInput = config.whatsappRecipient.trim();
-      let recipientId = recipientInput.replace(/\+/g, "");
-
-      // Check if recipient is a group invite URL or has chat.whatsapp.com
-      if (recipientInput.includes("chat.whatsapp.com")) {
-        try {
-          const parts = recipientInput.split("/");
-          const lastPart = parts[parts.length - 1].split("?")[0].trim();
-          addLog("info", `WhatsApp Recipient detected as Invite Link. Extracted code: "${lastPart}". Resolving JID...`, "whatsapp");
-          const inviteInfo = await whatsappClient.groupGetInviteInfo(lastPart);
-          if (inviteInfo && inviteInfo.id) {
-            recipientId = inviteInfo.id;
-            addLog("success", `Resolved Invite Link directly! Group Name: "${inviteInfo.subject}" | JID: "${recipientId}"`, "whatsapp");
-          } else {
-            throw new Error(`Failed to extract JID from invite metadata.`);
-          }
-        } catch (inviteErr: any) {
-          addLog("warn", `Could not automatically resolve invite link via Baileys API: ${inviteErr.message}`, "whatsapp");
-          // Fallback to extraction from parts just in case
-          const parts = recipientInput.split("/");
-          recipientId = parts[parts.length - 1].split("?")[0].trim();
-          if (!recipientId.endsWith("@g.us")) {
-            recipientId = `${recipientId}@g.us`;
-          }
-        }
-      } else if (!recipientId.endsWith("@s.whatsapp.net") && !recipientId.endsWith("@g.us")) {
+      let recipientId = config.whatsappRecipient.trim().replace(/\+/g, "");
+      if (!recipientId.endsWith("@s.whatsapp.net") && !recipientId.endsWith("@g.us")) {
         if (recipientId.includes("-") || recipientId.length > 15) {
           recipientId = `${recipientId}@g.us`;
         } else {
@@ -728,99 +549,6 @@ async function getGeminiClient(): Promise<GoogleGenAI> {
   });
 }
 
-// Helper functions to identify metadata and adverts to discard during scraping
-
-const monthRegex = /(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)/i;
-
-function isDatePattern(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (!clean) return false;
-
-  // 1. Check relative date e.g. "2 hours ago", "1 day ago", "20 mins ago", "just now"
-  if (/\b\d+\s*(?:second|sec|minute|min|hour|hr|day|week|month|year)s?\s+ago\b/i.test(clean)) return true;
-  if (/^\s*just\s+now\s*$/i.test(clean)) return true;
-
-  // 2. Check absolute month day year patterns e.g. "June 20, 2026", "20 June 2026", "Jun 20, 2026"
-  if (monthRegex.test(clean) && (/\b\d{4}\b/.test(clean) || /\b\d{1,2}\b/.test(clean))) {
-    if (clean.length < 80) return true;
-  }
-
-  // 3. Check standard numeric dates e.g. "20/06/2026" or "2026-06-20", "20-06-2026"
-  if (/\b\d{1,2}[\/\-–]\d{1,2}[\/\-–]\d{2,4}\b/.test(clean)) {
-    if (clean.length < 40) return true;
-  }
-  if (/\b\d{4}[\/\-–]\d{1,2}[\/\-–]\d{1,2}\b/.test(clean)) {
-    if (clean.length < 40) return true;
-  }
-
-  // 4. Check prefixed dates e.g. "published on...", "posted on...", "updated on..."
-  if (/^(?:published|posted|updated|date|time|on)\s*:/i.test(clean)) return true;
-  if (/^(?:published|posted|updated)\s+on\b/i.test(clean)) return true;
-
-  return false;
-}
-
-function isAuthorPattern(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (!clean) return false;
-
-  // Exact matching or presence of author/publisher names
-  if (clean.includes("bytvcnews") || clean.includes("by tvcnews") || clean.includes("by tvc news")) return true;
-  if (clean.includes("by daily trust") || clean.includes("by dailytrust")) return true;
-
-  // Lines starting with "by " (excluding general long sentences)
-  if (/^\s*by\s+/i.test(clean)) {
-    if (clean.length < 100) return true;
-  }
-
-  // Prefixed author markers
-  if (/^\s*(?:author|writer|reporter|journalist|editor)\s*:/i.test(clean)) return true;
-
-  return false;
-}
-
-function isAdvertOrUpdateNewsPattern(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (!clean) return false;
-
-  if (
-    clean.includes("advert") || 
-    clean.includes("update news") || 
-    clean.includes("news update")
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function isHeaderExcludedPhrase(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  return (
-    clean === "top news" ||
-    clean === "latest nigeria news" ||
-    clean === "entertainment latest nigeria news" ||
-    clean === "sports top news" ||
-    clean === "health top news" ||
-    clean === "politics top news"
-  );
-}
-
-function isScriptRemnant(text: string): boolean {
-  const clean = text.trim().toLowerCase();
-  if (
-    clean.includes("});") ||
-    clean.includes("});") ||
-    clean === "});" ||
-    clean === "});" ||
-    clean.includes("googletag") ||
-    clean.includes("cmd.push") ||
-    clean.includes("window.googletag")
-  ) {
-    return true;
-  }
-  return false;
-}
-
 // Helper to clean scraped news content from DailyTrust or TVC News sources to avoid Google adverts, breadcrumbs, related news, and promotional text.
 function cleanScrapedArticleText(rawText: string, sourceName: string): string {
   if (!rawText) return "";
@@ -837,11 +565,6 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
     if (!p) continue;
 
     const lowerP = p.toLowerCase();
-
-    // Global exclusions for any source (e.g. Header headings, leak script remnants, advert blocks)
-    if (isHeaderExcludedPhrase(p) || isScriptRemnant(p) || isAdvertOrUpdateNewsPattern(p)) {
-      continue;
-    }
 
     // If DailyTrust or TVC News, apply stricter filtering of target advert lines/blocks
     if (isDailyTrustOrTvc) {
@@ -880,19 +603,9 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       ) {
         continue;
       }
-
-      // 4. Exclude author name and dates of published article/news for DailyTrust/TVC Sources
-      if (isAuthorPattern(p) || isDatePattern(p)) {
-        continue;
-      }
-
-      // 5. Exclude words/phrases like ADVERT, UPDATE NEWS
-      if (isAdvertOrUpdateNewsPattern(p)) {
-        continue;
-      }
     }
 
-    // 6. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
+    // 4. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
     const isBreadcrumb =
       /^\s*home\s*[>»/|]/i.test(p) ||
       (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
@@ -902,7 +615,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       continue;
     }
 
-    // 7. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
+    // 5. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
     if (
       lowerP === "advertisement" ||
       lowerP === "also read" ||
@@ -916,7 +629,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       continue;
     }
 
-    // 8. Exclude Inline Related Posts or News/Articles link blocks
+    // 6. Exclude Inline Related Posts or News/Articles link blocks
     if (
       lowerP.startsWith("also read") ||
       lowerP.startsWith("read also") ||
@@ -943,11 +656,6 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       const lowerLine = line.toLowerCase();
       if (!line) continue;
 
-      // Global line exclusions for any source
-      if (isHeaderExcludedPhrase(line) || isScriptRemnant(line) || isAdvertOrUpdateNewsPattern(line)) {
-        continue;
-      }
-
       if (isDailyTrustOrTvc) {
         if (
           lowerLine.includes("googletag") ||
@@ -959,10 +667,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
           lowerLine.includes("advertisement") ||
           lowerLine.includes("advert –>") ||
           lowerLine === "–>" ||
-          lowerLine === "-->" ||
-          isAuthorPattern(line) ||
-          isDatePattern(line) ||
-          isAdvertOrUpdateNewsPattern(line)
+          lowerLine === "-->"
         ) {
           continue;
         }
@@ -1137,6 +842,10 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
     // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, etc.
     cleanText = cleanScrapedArticleText(cleanText, sourceName);
 
+    if (cleanText.length > 10000) {
+      cleanText = cleanText.substring(0, 10000) + "... [truncated]";
+    }
+
     addLog("success", `Crawled original webpage successfully. Extracted ${cleanText.length} characters, featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
 
     return {
@@ -1203,7 +912,6 @@ INSTRUCTIONS:
 2. Write a Professional Short Summary (1-2 sentences) of the core development.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
 4. Write a highly thorough, complete full-length news story, preserving the EXACT original separation of paragraphs in the crawled webpage. Each individual paragraph in the input text MUST be written as its own separate HTML paragraph (using a separate <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'> tag). Do NOT combine, merge, or condense multiple paragraphs into one giant block; instead, articulate and arrange them sequentially matching the natural flow of the news source report. Include every possible detail (descriptions, data, quotes, and timelines).
-   - UNLIMITED LENGTH MANDATE: You MUST make the news story unlimited in character or word count. No matter how long the original news story or article is, it must be fully translated/recreated without any truncating, shortening, condensing, summarizing, or abbreviation. Every single original paragraph, fact, direct/indirect quote, background context, sub-details, and list item must be preserved at full narrative length. Output the complete unabridged narrative.
    - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
    - You MUST embed the elected Featured Image at the absolute top of the article contentHtml.
@@ -1741,9 +1449,9 @@ async function autoPublishFreshArticles() {
       article.status = "published";
       addLog("success", `Successfully published to WordPress! ID: ${wpId}`, "publisher");
 
-      // Step C: Send WhatsApp and Telegram Notifiers
+      // Step C: Send WhatsApp Notifier
       const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
-      addLog("info", `Dispatching alert notifications to enabled gateways...`, "system");
+      addLog("info", `Dispatching WhatsApp alerts to admin...`, "whatsapp");
 
       try {
         const waSuccess = await sendWhatsAppMessage(config, msgBody);
@@ -1752,21 +1460,6 @@ async function autoPublishFreshArticles() {
         article.whatsappSent = false;
         article.whatsappError = waErr.message;
         addLog("error", `WhatsApp Notify Failed: ${waErr.message}`, "whatsapp");
-      }
-
-      try {
-        if (config.telegramEnabled) {
-          const tgSuccess = await sendTelegramMessage(config, msgBody);
-          article.telegramSent = tgSuccess;
-          article.telegramError = tgSuccess ? null : "Failed to send (check logs)";
-        } else {
-          article.telegramSent = false;
-          article.telegramError = null;
-        }
-      } catch (tgErr: any) {
-        article.telegramSent = false;
-        article.telegramError = tgErr.message;
-        addLog("error", `Telegram Notify Failed: ${tgErr.message}`, "system");
       }
 
     } catch (pubErr: any) {
@@ -1852,61 +1545,7 @@ app.get("/api/whatsapp/status", (req, res) => {
     status: whatsappClientStatus,
     qrCode: whatsappQrCodeDataUrl,
     error: whatsappConnectionError,
-    recipient: loadDb().config.whatsappRecipient || "",
-    pairingCode: whatsappPairingCode,
-    pairingPhone: whatsappPairingPhone
-  });
-});
-
-app.post("/api/whatsapp/pairing-code", async (req, res) => {
-  const { phoneNumber } = req.body;
-  if (!phoneNumber) {
-    return res.status(400).json({ error: "Phone number is required for pairing." });
-  }
-
-  // Clean phone number (keep only digits)
-  const cleanPhone = phoneNumber.replace(/\D/g, "");
-  if (!cleanPhone) {
-    return res.status(400).json({ error: "Invalid phone number formatting." });
-  }
-
-  addLog("info", `Initiating phone pairing handshake sequence for: +${cleanPhone}...`, "whatsapp");
-
-  // Step 1: Force reset existing client
-  if (whatsappClient) {
-    try {
-      if (typeof whatsappClient.logout === "function") {
-        await whatsappClient.logout().catch(() => {});
-      } else if (typeof whatsappClient.end === "function") {
-        whatsappClient.end(undefined);
-      }
-    } catch (_) {}
-    whatsappClient = null;
-  }
-
-  // Step 2: Delete auth credentials folder to guarantee a fresh register pairing
-  try {
-    const authPath = path.join(process.cwd(), ".baileys_auth");
-    if (fs.existsSync(authPath)) {
-      fs.rmSync(authPath, { recursive: true, force: true });
-    }
-  } catch (err: any) {
-    addLog("warn", `Could not purge old auth directory: ${err.message}`, "whatsapp");
-  }
-
-  // Step 3: Seed variables
-  whatsappPairingPhone = cleanPhone;
-  whatsappPairingCode = null;
-  whatsappQrCodeDataUrl = null;
-  whatsappConnectionError = null;
-  whatsappClientStatus = "AUTHENTICATING";
-
-  // Step 4: Re-initialize client to trigger the pairing code request hook
-  initializeWhatsAppWebClient();
-
-  res.json({
-    status: "ok",
-    message: "Requested pairing code successfully. Please poll status to obtain pairing token."
+    recipient: loadDb().config.whatsappRecipient || ""
   });
 });
 
@@ -2094,7 +1733,7 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     article.publishError = null;
     addLog("success", `Article force-published to WordPress successfully! WP ID: ${wpId}`, "publisher");
 
-    // 3. WhatsApp and Telegram Alerts dispatch
+    // 3. WhatsApp Alerts dispatch
     const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
     try {
       const waSuccess = await sendWhatsAppMessage(config, msgBody);
@@ -2104,21 +1743,6 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
       article.whatsappSent = false;
       article.whatsappError = e.message;
       addLog("error", `WhatsApp failed during manual post trigger: ${e.message}`, "whatsapp");
-    }
-
-    try {
-      if (config.telegramEnabled) {
-        const tgSuccess = await sendTelegramMessage(config, msgBody);
-        article.telegramSent = tgSuccess;
-        article.telegramError = tgSuccess ? null : "Failed to send (check logs)";
-      } else {
-        article.telegramSent = false;
-        article.telegramError = null;
-      }
-    } catch (e: any) {
-      article.telegramSent = false;
-      article.telegramError = e.message;
-      addLog("error", `Telegram failed during manual post trigger: ${e.message}`, "system");
     }
 
   } catch (err: any) {
