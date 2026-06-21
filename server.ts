@@ -302,11 +302,7 @@ function loadDb() {
         fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2));
       }
     }
-    if (!parsed.config) {
-      parsed.config = { ...DEFAULT_CONFIG };
-    } else {
-      parsed.config = { ...DEFAULT_CONFIG, ...parsed.config };
-    }
+    if (!parsed.config) parsed.config = DEFAULT_CONFIG;
     if (!parsed.logs) parsed.logs = [];
     return parsed;
   } catch (e) {
@@ -538,14 +534,8 @@ async function sendTelegramMessage(config: SystemConfig, body: string): Promise<
 
   try {
     addLog("info", `Attempting to send Telegram alert to Chat ID: ${config.telegramChatId}...`, "system");
-    // Escape standard HTML characters first to avoid Telegram parsing errors (e.g. if title has & < >)
-    const escapedText = body
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-
     // Convert *text* to bold for HTML parse_mode
-    const formattedText = escapedText
+    const formattedText = body
       .replace(/\*(.*?)\*/g, "<b>$1</b>")
       .replace(/_(.*?)_/g, "<i>$1</i>");
 
