@@ -119,7 +119,7 @@ async function initializeWhatsAppWebClient() {
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
       connectTimeoutMs: 60000,
-      browser: ["Ubuntu", "Chrome", "20.0.04"],
+      browser: Browsers.ubuntu("Chrome"),
     };
 
     if (activeWaVersion) {
@@ -162,7 +162,7 @@ async function initializeWhatsAppWebClient() {
       if (connection === "close") {
         const statusCode = (lastDisconnect?.error as any)?.output?.statusCode || (lastDisconnect?.error as any)?.statusCode;
         const errMessage = lastDisconnect?.error?.message || "Connection timed out or closed.";
-        const isAuthFailure = statusCode === DisconnectReason.loggedOut;
+        const isAuthFailure = statusCode === DisconnectReason.loggedOut || statusCode === 401 || statusCode === 403 || statusCode === 405;
         const shouldReconnect = !isAuthFailure;
         
         whatsappClientStatus = "DISCONNECTED";
@@ -176,7 +176,7 @@ async function initializeWhatsAppWebClient() {
         }
 
         if (isAuthFailure) {
-          addLog("error", `WhatsApp credentials/session revoked (statusCode: ${statusCode}). Purging stale auth folder so a fresh QR code can be generated.`, "whatsapp");
+          addLog("error", `WhatsApp session failure/revocation (statusCode: ${statusCode}). Purging stale state so a fresh QR/pairing code can be generated.`, "whatsapp");
           try {
             const authPath = path.join(process.cwd(), ".baileys_auth");
             if (fs.existsSync(authPath)) {
@@ -186,7 +186,7 @@ async function initializeWhatsAppWebClient() {
             addLog("warn", `Could not clear stale Baileys session folder: ${delErr.message}`, "whatsapp");
           }
           whatsappClient = null;
-          addLog("info", `Restarting WhatsApp initialization in 3 seconds to prompt a fresh login QR...`, "whatsapp");
+          addLog("info", `Restarting WhatsApp initialization cleanly in 3 seconds to prompt a fresh login...`, "whatsapp");
           setTimeout(() => {
             initializeWhatsAppWebClient();
           }, 3000);
