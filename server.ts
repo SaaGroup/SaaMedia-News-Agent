@@ -231,21 +231,21 @@ const DEFAULT_SOURCES: NewsSource[] = [
 ];
 
 const DEFAULT_CONFIG: SystemConfig = {
-  wordpressUrl: "https://saamedia.com.ng",
-  wordpressUsername: "admin",
-  wordpressPassword: "",
-  wordpressMode: "rest",
-  whatsappRecipient: "+2348000000000",
-  whatsappGateway: "mock",
-  whatsappSenderNumber: "+14155238886",
-  whatsappAccountSid: "",
-  whatsappApiKey: "",
-  schedulerIntervalMins: 180,
-  schedulerEnabled: true,
-  apiKeyOverride: "",
-  telegramToken: "",
-  telegramChatId: "",
-  telegramEnabled: false
+  wordpressUrl: process.env.WORDPRESS_URL || "https://saamedia.com.ng",
+  wordpressUsername: process.env.WORDPRESS_USERNAME || "admin",
+  wordpressPassword: process.env.WORDPRESS_PASSWORD || "",
+  wordpressMode: (process.env.WORDPRESS_MODE || "rest") as "rest" | "xmlrpc",
+  whatsappRecipient: process.env.WHATSAPP_RECIPIENT || "+2348000000000",
+  whatsappGateway: (process.env.WHATSAPP_GATEWAY || "mock") as "twilio" | "custom_webhook" | "mock" | "whatsapp-web",
+  whatsappSenderNumber: process.env.WHATSAPP_SENDER_NUMBER || "+14155238886",
+  whatsappAccountSid: process.env.WHATSAPP_ACCOUNT_SID || "",
+  whatsappApiKey: process.env.WHATSAPP_API_KEY || "",
+  schedulerIntervalMins: process.env.SCHEDULER_INTERVAL_MINS ? parseInt(process.env.SCHEDULER_INTERVAL_MINS, 10) : 180,
+  schedulerEnabled: process.env.SCHEDULER_ENABLED !== "false",
+  apiKeyOverride: process.env.API_KEY_OVERRIDE || "",
+  telegramToken: process.env.TELEGRAM_TOKEN || "",
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
+  telegramEnabled: process.env.TELEGRAM_ENABLED === "true"
 };
 
 // Database Initialization Helper
