@@ -13,6 +13,8 @@ export interface Article {
   publishedAt: string | null;
   whatsappSent: boolean;
   whatsappError: string | null;
+  telegramSent?: boolean;
+  telegramError?: string | null;
   publishError: string | null;
   featuredImage?: string | null;
   isEnriched?: boolean;
@@ -49,4 +51,7 @@ export interface SystemConfig {
   schedulerIntervalMins: number;
   schedulerEnabled: boolean;
   apiKeyOverride: string;
+  telegramToken?: string;
+  telegramChatId?: string;
+  telegramEnabled?: boolean;
 }
