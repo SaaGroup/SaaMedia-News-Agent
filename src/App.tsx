@@ -98,6 +98,20 @@ export default function App() {
   const [pairingPhoneInput, setPairingPhoneInput] = useState("");
   const [pairingLoading, setPairingLoading] = useState(false);
 
+  // Local config form state to prevent background polling from resetting fields during active typing
+  const [localConfig, setLocalConfig] = useState<SystemConfig | null>(null);
+
+  // Sync with main config when entering settings, nullify when navigating away
+  useEffect(() => {
+    if (activeTab === "settings" && !localConfig) {
+      setLocalConfig(config);
+    } else if (activeTab !== "settings" && localConfig) {
+      setLocalConfig(null);
+    }
+  }, [activeTab, config]);
+
+  const activeConfig = localConfig || config;
+
   // UI Interactive States
   const [loading, setLoading] = useState(false);
   const [scraping, setScraping] = useState(false);
@@ -245,14 +259,16 @@ export default function App() {
   // Save Credentials Config
   const handleSaveConfig = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!localConfig) return;
     try {
       const res = await fetch("/api/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config)
+        body: JSON.stringify(localConfig)
       });
       if (res.ok) {
         triggerAlert("success", "Gateways and WP credentials saved. Scheduler updated.");
+        setConfig(localConfig);
         fetchData();
       } else {
         triggerAlert("error", "Failed to persist core configurations.");
@@ -1383,14 +1399,14 @@ export default function App() {
 
                       <button
                         type="button"
-                        onClick={() => setConfig({ ...config, schedulerEnabled: !config.schedulerEnabled })}
+                        onClick={() => setLocalConfig({ ...activeConfig, schedulerEnabled: !activeConfig.schedulerEnabled })}
                         className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                          config.schedulerEnabled ? "bg-[#008751]" : "bg-slate-800"
+                          activeConfig.schedulerEnabled ? "bg-[#008751]" : "bg-slate-800"
                         }`}
                       >
                         <span
                           className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                            config.schedulerEnabled ? "translate-x-5" : "translate-x-0"
+                            activeConfig.schedulerEnabled ? "translate-x-5" : "translate-x-0"
                           }`}
                         />
                       </button>
@@ -1402,8 +1418,8 @@ export default function App() {
                         type="number"
                         min={5}
                         required
-                        value={config.schedulerIntervalMins}
-                        onChange={(e) => setConfig({ ...config, schedulerIntervalMins: Number(e.target.value) })}
+                        value={activeConfig.schedulerIntervalMins}
+                        onChange={(e) => setLocalConfig({ ...activeConfig, schedulerIntervalMins: Number(e.target.value) })}
                         placeholder="e.g., 60"
                         className="w-full text-xs font-mono bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                       />
@@ -1420,8 +1436,8 @@ export default function App() {
                       <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">Target WordPress URL</label>
                       <input
                         type="url"
-                        value={config.wordpressUrl}
-                        onChange={(e) => setConfig({ ...config, wordpressUrl: e.target.value })}
+                        value={activeConfig.wordpressUrl}
+                        onChange={(e) => setLocalConfig({ ...activeConfig, wordpressUrl: e.target.value })}
                         placeholder="https://saamedia.com.ng"
                         className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                       />
@@ -1432,8 +1448,8 @@ export default function App() {
                         <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">WP Admin Username</label>
                         <input
                           type="text"
-                          value={config.wordpressUsername}
-                          onChange={(e) => setConfig({ ...config, wordpressUsername: e.target.value })}
+                          value={activeConfig.wordpressUsername}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, wordpressUsername: e.target.value })}
                           placeholder="e.g., admin"
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                         />
@@ -1443,8 +1459,8 @@ export default function App() {
                         <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">WP Application Password *</label>
                         <input
                           type="password"
-                          value={config.wordpressPassword}
-                          onChange={(e) => setConfig({ ...config, wordpressPassword: e.target.value })}
+                          value={activeConfig.wordpressPassword}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, wordpressPassword: e.target.value })}
                           placeholder="Password or WP Application secret key"
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                         />
@@ -1455,8 +1471,8 @@ export default function App() {
                     <div>
                       <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">Publish API Protocol Integration</label>
                       <select
-                        value={config.wordpressMode}
-                        onChange={(e) => setConfig({ ...config, wordpressMode: e.target.value as "xmlrpc" | "rest" })}
+                        value={activeConfig.wordpressMode}
+                        onChange={(e) => setLocalConfig({ ...activeConfig, wordpressMode: e.target.value as "xmlrpc" | "rest" })}
                         className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                       >
                         <option value="rest">WordPress REST Core API (Recommended - Stable & Secure)</option>
@@ -1476,8 +1492,8 @@ export default function App() {
                         <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-450 mb-1">WhatsApp Recipient (Number or Group ID) *</label>
                         <input
                           type="text"
-                          value={config.whatsappRecipient}
-                          onChange={(e) => setConfig({ ...config, whatsappRecipient: e.target.value })}
+                          value={activeConfig.whatsappRecipient}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, whatsappRecipient: e.target.value })}
                           placeholder="e.g., 2348030000000 or group ID"
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751] font-mono"
                         />
@@ -1486,8 +1502,8 @@ export default function App() {
                       <div>
                         <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-455 mb-1">Direct Gateway Selected</label>
                         <select
-                          value={config.whatsappGateway}
-                          onChange={(e) => setConfig({ ...config, whatsappGateway: e.target.value as "twilio" | "custom_webhook" | "mock" | "whatsapp-web" })}
+                          value={activeConfig.whatsappGateway}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, whatsappGateway: e.target.value as "twilio" | "custom_webhook" | "mock" | "whatsapp-web" })}
                           className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
                         >
                           <option value="mock">Log Simulation Channel (Instant - Zero Config Sandbox)</option>
@@ -1498,7 +1514,7 @@ export default function App() {
                       </div>
                     </div>
 
-                    {config.whatsappGateway === "twilio" && (
+                    {activeConfig.whatsappGateway === "twilio" && (
                       <motion.div 
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: "auto" }}
@@ -1509,8 +1525,8 @@ export default function App() {
                             <label className="block font-mono font-semibold text-slate-400 mb-1">Twilio Account SID</label>
                             <input
                               type="text"
-                              value={config.whatsappAccountSid}
-                              onChange={(e) => setConfig({ ...config, whatsappAccountSid: e.target.value })}
+                              value={activeConfig.whatsappAccountSid}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, whatsappAccountSid: e.target.value })}
                               className="w-full bg-[#162033] border border-slate-700 text-slate-100 rounded-lg px-3 py-2 focus:border-[#008751] focus:outline-none"
                             />
                           </div>
@@ -1519,8 +1535,8 @@ export default function App() {
                             <label className="block font-mono font-semibold text-slate-400 mb-1">Twilio API Auth token</label>
                             <input
                               type="password"
-                              value={config.whatsappApiKey}
-                              onChange={(e) => setConfig({ ...config, whatsappApiKey: e.target.value })}
+                              value={activeConfig.whatsappApiKey}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, whatsappApiKey: e.target.value })}
                               className="w-full bg-[#162033] border border-slate-700 text-slate-100 rounded-lg px-3 py-2 focus:border-[#008751] focus:outline-none"
                             />
                           </div>
@@ -1529,8 +1545,8 @@ export default function App() {
                             <label className="block font-mono font-semibold text-slate-400 mb-1">Sender WhatsApp Number</label>
                             <input
                               type="text"
-                              value={config.whatsappSenderNumber}
-                              onChange={(e) => setConfig({ ...config, whatsappSenderNumber: e.target.value })}
+                              value={activeConfig.whatsappSenderNumber}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, whatsappSenderNumber: e.target.value })}
                               placeholder="+14155238886"
                               className="w-full bg-[#162033] border border-slate-700 text-slate-100 rounded-lg px-3 py-2 focus:border-[#008751] focus:outline-none"
                             />
@@ -1539,7 +1555,7 @@ export default function App() {
                       </motion.div>
                     )}
 
-                    {config.whatsappGateway === "custom_webhook" && (
+                    {activeConfig.whatsappGateway === "custom_webhook" && (
                       <motion.div 
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: "auto" }}
@@ -1548,8 +1564,8 @@ export default function App() {
                         <label className="block text-xs font-mono font-semibold text-slate-400 mb-1">JSON Endpoint Webhook URL</label>
                         <input
                           type="url"
-                          value={config.whatsappApiKey}
-                          onChange={(e) => setConfig({ ...config, whatsappApiKey: e.target.value })}
+                          value={activeConfig.whatsappApiKey}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, whatsappApiKey: e.target.value })}
                           placeholder="https://api.ultramsg.com/instanceXXX/messages/chat"
                           className="w-full text-xs font-mono bg-[#162033] border border-slate-700 text-slate-100 rounded-lg px-3 py-2 focus:border-[#008751] focus:outline-none"
                         />
@@ -1557,7 +1573,7 @@ export default function App() {
                       </motion.div>
                     )}
 
-                    {config.whatsappGateway === "whatsapp-web" && (
+                    {activeConfig.whatsappGateway === "whatsapp-web" && (
                       <motion.div 
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: "auto" }}
@@ -1721,15 +1737,15 @@ export default function App() {
                       <label className="relative inline-flex items-center cursor-pointer">
                         <input
                           type="checkbox"
-                          checked={config.telegramEnabled || false}
-                          onChange={(e) => setConfig({ ...config, telegramEnabled: e.target.checked })}
+                          checked={activeConfig.telegramEnabled || false}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, telegramEnabled: e.target.checked })}
                           className="sr-only peer"
                         />
                         <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-cyan-600"></div>
                       </label>
                     </div>
 
-                    {config.telegramEnabled && (
+                    {activeConfig.telegramEnabled && (
                       <motion.div
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: "auto" }}
@@ -1740,8 +1756,8 @@ export default function App() {
                             <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">Telegram Bot Token *</label>
                             <input
                               type="text"
-                              value={config.telegramToken || ""}
-                              onChange={(e) => setConfig({ ...config, telegramToken: e.target.value })}
+                              value={activeConfig.telegramToken || ""}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, telegramToken: e.target.value })}
                               placeholder="e.g., 123456789:ABCDefghIjkLmNoP"
                               className="w-full text-xs font-mono bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
                             />
@@ -1752,8 +1768,8 @@ export default function App() {
                             <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">Telegram Share Chat/Channel ID *</label>
                             <input
                               type="text"
-                              value={config.telegramChatId || ""}
-                              onChange={(e) => setConfig({ ...config, telegramChatId: e.target.value })}
+                              value={activeConfig.telegramChatId || ""}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, telegramChatId: e.target.value })}
                               placeholder="e.g., @saamedia_alerts or channel ID"
                               className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
                             />

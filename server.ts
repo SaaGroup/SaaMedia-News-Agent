@@ -31,10 +31,18 @@ let activeWaVersion: any = null; // Memory cache to prevent 429 blocks during re
 let whatsappPairingCode: string | null = null;
 let whatsappPairingPhone: string | null = null;
 
+let whatsappPairingTimeout: NodeJS.Timeout | null = null;
+
 async function initializeWhatsAppWebClient() {
   if (whatsappClient) {
     addLog("info", "WhatsApp Web client is already initialized. Skipping.", "whatsapp");
     return;
+  }
+
+  // Clear any existing pairing timeout
+  if (whatsappPairingTimeout) {
+    clearTimeout(whatsappPairingTimeout);
+    whatsappPairingTimeout = null;
   }
 
   addLog("info", "Initializing WhatsApp Web client (Baileys Engine - 100% Free & No Puppeteer) ...", "whatsapp");
@@ -47,7 +55,6 @@ async function initializeWhatsAppWebClient() {
 
     // Cache the fetched version globally to avoid repeating fetch queries and hitting 429 rate limit
     if (!activeWaVersion) {
-      activeWaVersion = [2, 3000, 1041848672]; // Modern robust working fallback default of @whiskeysockets/baileys
       try {
         addLog("info", "Attempting a dynamic live WhatsApp Web version fetch safely via Baileys API... (once per session)", "whatsapp");
         const { version, isLatest } = await fetchLatestWaWebVersion({});
@@ -84,36 +91,45 @@ async function initializeWhatsAppWebClient() {
                   activeWaVersion = [2, 3000, clientRev];
                   addLog("info", `Successfully fetched active live WhatsApp Web version via Home: ${activeWaVersion.join(".")}`, "whatsapp");
                 } else {
-                  addLog("warn", `Regex client_revision matching failed. Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
+                  addLog("warn", `Regex client_revision matching failed. Falling back to letting Baileys resolve the version internally...`, "whatsapp");
+                  activeWaVersion = null;
                 }
               } else {
-                addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to robust static version: ${activeWaVersion.join(".")}`, "whatsapp");
+                addLog("warn", `Failed to fetch home for regex (status ${homeRes.status}). Falling back to letting Baileys resolve the version internally...`, "whatsapp");
+                activeWaVersion = null;
               }
             }
           } else {
-            addLog("warn", `Failed to fetch sw.js (status ${res.status}). Using robust static version fallback: ${activeWaVersion.join(".")}`, "whatsapp");
+            addLog("warn", `Failed to fetch sw.js (status ${res.status}). Falling back to letting Baileys resolve the version internally...`, "whatsapp");
+            activeWaVersion = null;
           }
         } catch (subErr: any) {
-          addLog("warn", `Could not dynamically fetch WhatsApp Web version via custom fallback: ${subErr.message}. Defaulting to robust fallback: ${activeWaVersion.join(".")}`, "whatsapp");
+          addLog("warn", `Could not dynamically fetch WhatsApp Web version via custom fallback: ${subErr.message}. Falling back to letting Baileys resolve the version internally...`, "whatsapp");
+          activeWaVersion = null;
         }
       }
     } else {
-      addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
+      addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion ? activeWaVersion.join(".") : "Default"}`, "whatsapp");
     }
 
     const usePairing = !!whatsappPairingPhone;
 
-    whatsappClient = makeWASocket({
-      version: activeWaVersion,
+    const socketConfig: any = {
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
       connectTimeoutMs: 60000,
       browser: ["Ubuntu", "Chrome", "20.0.04"],
-    });
+    };
 
-    if (usePairing && !state.creds.registered) {
-      setTimeout(async () => {
+    if (activeWaVersion) {
+      socketConfig.version = activeWaVersion;
+    }
+
+    whatsappClient = makeWASocket(socketConfig);
+
+    if (usePairing && !state.creds.registered && !whatsappPairingCode) {
+      whatsappPairingTimeout = setTimeout(async () => {
         try {
           if (!whatsappClient) return;
           addLog("info", `Requesting WhatsApp Web pairing code for phone number: ${whatsappPairingPhone} ...`, "whatsapp");
@@ -194,28 +210,6 @@ async function initializeWhatsAppWebClient() {
         whatsappPairingCode = null;
         whatsappPairingPhone = null;
         addLog("success", "SaaMedia WhatsApp Bot is online and CONNECTED! Ready to send alerts.", "whatsapp");
-        
-        // Stagger the group discovery by 5 seconds to prevent early socket congestion/rejection (error 405)
-        setTimeout(async () => {
-          if (!whatsappClient || whatsappClientStatus !== "CONNECTED") return;
-          try {
-            addLog("info", "Connected! Querying active group chats to discover JIDs...", "whatsapp");
-            const groups = await whatsappClient.groupFetchAllParticipating();
-            const groupKeys = Object.keys(groups);
-            if (groupKeys.length > 0) {
-              addLog("info", `---------- DISCOVERED ACTIVE WHATSAPP GROUPS ----------`, "whatsapp");
-              for (const gId of groupKeys) {
-                const gMeta = groups[gId];
-                addLog("info", `Group ID (JID): "${gId}" | Group Name: "${gMeta.subject || "No Name"}"`, "whatsapp");
-              }
-              addLog("info", `-------------------------------------------------------`, "whatsapp");
-            } else {
-              addLog("info", "No active WhatsApp groups discovered for this connected phone number.", "whatsapp");
-            }
-          } catch (gErr: any) {
-            addLog("warn", `Could not automatically fetch listed group JIDs: ${gErr.message}`, "whatsapp");
-          }
-        }, 5000);
       }
     });
 
@@ -536,25 +530,29 @@ async function sendTelegramMessage(config: SystemConfig, body: string): Promise<
     return false;
   }
 
+  const chatId = String(config.telegramChatId).trim();
+  const token = String(config.telegramToken).trim();
+
   try {
-    addLog("info", `Attempting to send Telegram alert to Chat ID: ${config.telegramChatId}...`, "system");
+    addLog("info", `Attempting to send Telegram alert to Chat ID: "${chatId}"...`, "system");
+    
     // Escape standard HTML characters first to avoid Telegram parsing errors (e.g. if title has & < >)
     const escapedText = body
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
 
-    // Convert *text* to bold for HTML parse_mode
-    const formattedText = escapedText
-      .replace(/\*(.*?)\*/g, "<b>$1</b>")
-      .replace(/_(.*?)_/g, "<i>$1</i>");
+    // Convert *text* and _text_ to HTML tags safely
+    let formattedText = escapedText;
+    formattedText = formattedText.replace(/\*([^\*]+)\*/g, "<b>$1</b>");
+    formattedText = formattedText.replace(/_([^_]+)_/g, "<i>$1</i>");
 
-    const url = `https://api.telegram.com/bot${config.telegramToken}/sendMessage`;
+    const url = `https://api.telegram.com/bot${token}/sendMessage`;
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: config.telegramChatId,
+        chat_id: chatId,
         text: formattedText,
         parse_mode: "HTML"
       })
@@ -562,14 +560,14 @@ async function sendTelegramMessage(config: SystemConfig, body: string): Promise<
 
     if (!response.ok) {
       const errText = await response.text();
-      addLog("error", `Telegram alert failed (status ${response.status}): ${errText}`, "system");
+      addLog("error", `Telegram alert to "${chatId}" failed (status ${response.status}): ${errText}`, "system");
       return false;
     }
 
-    addLog("success", `Successfully delivered news alert to Telegram Chat ID: ${config.telegramChatId}`, "system");
+    addLog("success", `Successfully delivered news alert to Telegram Chat ID: "${chatId}"`, "system");
     return true;
   } catch (err: any) {
-    addLog("error", `Telegram networking failure: ${err.message}`, "system");
+    addLog("error", `Telegram networking failure for "${chatId}": ${err.message}`, "system");
     return false;
   }
 }
