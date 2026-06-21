@@ -28,6 +28,8 @@ let whatsappClientStatus: "DISCONNECTED" | "AUTHENTICATING" | "QR_RECEIVED" | "C
 let whatsappQrCodeDataUrl: string | null = null;
 let whatsappConnectionError: string | null = null;
 let activeWaVersion: any = null; // Memory cache to prevent 429 blocks during reconnect loops
+let whatsappPairingCode: string | null = null;
+let whatsappPairingPhone: string | null = null;
 
 async function initializeWhatsAppWebClient() {
   if (whatsappClient) {
@@ -99,14 +101,32 @@ async function initializeWhatsAppWebClient() {
       addLog("info", `Using cached WhatsApp Web version: ${activeWaVersion.join(".")}`, "whatsapp");
     }
 
+    const usePairing = !!whatsappPairingPhone;
+
     whatsappClient = makeWASocket({
       version: activeWaVersion,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: "warn" }),
       connectTimeoutMs: 60000,
-      browser: Browsers.macOS("Desktop"),
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
     });
+
+    if (usePairing && !state.creds.registered) {
+      setTimeout(async () => {
+        try {
+          if (!whatsappClient) return;
+          addLog("info", `Requesting WhatsApp Web pairing code for phone number: ${whatsappPairingPhone} ...`, "whatsapp");
+          const code = await whatsappClient.requestPairingCode(whatsappPairingPhone);
+          whatsappPairingCode = code;
+          whatsappClientStatus = "QR_RECEIVED"; // Mark status so frontend displays the pairing UI
+          addLog("success", `WhatsApp Web pairing code generated successfully: ${code}`, "whatsapp");
+        } catch (err: any) {
+          whatsappConnectionError = `Failed to generate pairing code: ${err.message}`;
+          addLog("error", `Failed to request pairing code: ${err.message}`, "whatsapp");
+        }
+      }, 5000); // Wait 5s for network layer readiness
+    }
 
     whatsappClient.ev.on("creds.update", saveCreds);
 
@@ -171,6 +191,8 @@ async function initializeWhatsAppWebClient() {
       } else if (connection === "open") {
         whatsappClientStatus = "CONNECTED";
         whatsappQrCodeDataUrl = null;
+        whatsappPairingCode = null;
+        whatsappPairingPhone = null;
         addLog("success", "SaaMedia WhatsApp Bot is online and CONNECTED! Ready to send alerts.", "whatsapp");
         
         // Stagger the group discovery by 5 seconds to prevent early socket congestion/rejection (error 405)
@@ -226,7 +248,10 @@ const DEFAULT_CONFIG: SystemConfig = {
   whatsappApiKey: "",
   schedulerIntervalMins: 180,
   schedulerEnabled: true,
-  apiKeyOverride: ""
+  apiKeyOverride: "",
+  telegramToken: "",
+  telegramChatId: "",
+  telegramEnabled: false
 };
 
 // Database Initialization Helper
@@ -495,6 +520,48 @@ async function wordpressPublishRest(config: SystemConfig, title: string, htmlCon
 
   const data: any = await response.json();
   return data.id ? String(data.id) : "success_rest";
+}
+
+// Telegram Notifier Implementation
+async function sendTelegramMessage(config: SystemConfig, body: string): Promise<boolean> {
+  if (!config.telegramEnabled) {
+    return false;
+  }
+  if (!config.telegramToken || !config.telegramChatId) {
+    addLog("warn", "Telegram alerts are enabled but Token or Chat ID is empty.", "system");
+    return false;
+  }
+
+  try {
+    addLog("info", `Attempting to send Telegram alert to Chat ID: ${config.telegramChatId}...`, "system");
+    // Convert *text* to bold for HTML parse_mode
+    const formattedText = body
+      .replace(/\*(.*?)\*/g, "<b>$1</b>")
+      .replace(/_(.*?)_/g, "<i>$1</i>");
+
+    const url = `https://api.telegram.com/bot${config.telegramToken}/sendMessage`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: config.telegramChatId,
+        text: formattedText,
+        parse_mode: "HTML"
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      addLog("error", `Telegram alert failed (status ${response.status}): ${errText}`, "system");
+      return false;
+    }
+
+    addLog("success", `Successfully delivered news alert to Telegram Chat ID: ${config.telegramChatId}`, "system");
+    return true;
+  } catch (err: any) {
+    addLog("error", `Telegram networking failure: ${err.message}`, "system");
+    return false;
+  }
 }
 
 // WhatsApp Notifier Implementation
@@ -1674,9 +1741,9 @@ async function autoPublishFreshArticles() {
       article.status = "published";
       addLog("success", `Successfully published to WordPress! ID: ${wpId}`, "publisher");
 
-      // Step C: Send WhatsApp Notifier
+      // Step C: Send WhatsApp and Telegram Notifiers
       const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
-      addLog("info", `Dispatching WhatsApp alerts to admin...`, "whatsapp");
+      addLog("info", `Dispatching alert notifications to enabled gateways...`, "system");
 
       try {
         const waSuccess = await sendWhatsAppMessage(config, msgBody);
@@ -1685,6 +1752,21 @@ async function autoPublishFreshArticles() {
         article.whatsappSent = false;
         article.whatsappError = waErr.message;
         addLog("error", `WhatsApp Notify Failed: ${waErr.message}`, "whatsapp");
+      }
+
+      try {
+        if (config.telegramEnabled) {
+          const tgSuccess = await sendTelegramMessage(config, msgBody);
+          article.telegramSent = tgSuccess;
+          article.telegramError = tgSuccess ? null : "Failed to send (check logs)";
+        } else {
+          article.telegramSent = false;
+          article.telegramError = null;
+        }
+      } catch (tgErr: any) {
+        article.telegramSent = false;
+        article.telegramError = tgErr.message;
+        addLog("error", `Telegram Notify Failed: ${tgErr.message}`, "system");
       }
 
     } catch (pubErr: any) {
@@ -1770,7 +1852,61 @@ app.get("/api/whatsapp/status", (req, res) => {
     status: whatsappClientStatus,
     qrCode: whatsappQrCodeDataUrl,
     error: whatsappConnectionError,
-    recipient: loadDb().config.whatsappRecipient || ""
+    recipient: loadDb().config.whatsappRecipient || "",
+    pairingCode: whatsappPairingCode,
+    pairingPhone: whatsappPairingPhone
+  });
+});
+
+app.post("/api/whatsapp/pairing-code", async (req, res) => {
+  const { phoneNumber } = req.body;
+  if (!phoneNumber) {
+    return res.status(400).json({ error: "Phone number is required for pairing." });
+  }
+
+  // Clean phone number (keep only digits)
+  const cleanPhone = phoneNumber.replace(/\D/g, "");
+  if (!cleanPhone) {
+    return res.status(400).json({ error: "Invalid phone number formatting." });
+  }
+
+  addLog("info", `Initiating phone pairing handshake sequence for: +${cleanPhone}...`, "whatsapp");
+
+  // Step 1: Force reset existing client
+  if (whatsappClient) {
+    try {
+      if (typeof whatsappClient.logout === "function") {
+        await whatsappClient.logout().catch(() => {});
+      } else if (typeof whatsappClient.end === "function") {
+        whatsappClient.end(undefined);
+      }
+    } catch (_) {}
+    whatsappClient = null;
+  }
+
+  // Step 2: Delete auth credentials folder to guarantee a fresh register pairing
+  try {
+    const authPath = path.join(process.cwd(), ".baileys_auth");
+    if (fs.existsSync(authPath)) {
+      fs.rmSync(authPath, { recursive: true, force: true });
+    }
+  } catch (err: any) {
+    addLog("warn", `Could not purge old auth directory: ${err.message}`, "whatsapp");
+  }
+
+  // Step 3: Seed variables
+  whatsappPairingPhone = cleanPhone;
+  whatsappPairingCode = null;
+  whatsappQrCodeDataUrl = null;
+  whatsappConnectionError = null;
+  whatsappClientStatus = "AUTHENTICATING";
+
+  // Step 4: Re-initialize client to trigger the pairing code request hook
+  initializeWhatsAppWebClient();
+
+  res.json({
+    status: "ok",
+    message: "Requested pairing code successfully. Please poll status to obtain pairing token."
   });
 });
 
@@ -1958,7 +2094,7 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     article.publishError = null;
     addLog("success", `Article force-published to WordPress successfully! WP ID: ${wpId}`, "publisher");
 
-    // 3. WhatsApp Alerts dispatch
+    // 3. WhatsApp and Telegram Alerts dispatch
     const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
     try {
       const waSuccess = await sendWhatsAppMessage(config, msgBody);
@@ -1968,6 +2104,21 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
       article.whatsappSent = false;
       article.whatsappError = e.message;
       addLog("error", `WhatsApp failed during manual post trigger: ${e.message}`, "whatsapp");
+    }
+
+    try {
+      if (config.telegramEnabled) {
+        const tgSuccess = await sendTelegramMessage(config, msgBody);
+        article.telegramSent = tgSuccess;
+        article.telegramError = tgSuccess ? null : "Failed to send (check logs)";
+      } else {
+        article.telegramSent = false;
+        article.telegramError = null;
+      }
+    } catch (e: any) {
+      article.telegramSent = false;
+      article.telegramError = e.message;
+      addLog("error", `Telegram failed during manual post trigger: ${e.message}`, "system");
     }
 
   } catch (err: any) {
