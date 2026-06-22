@@ -245,7 +245,10 @@ const DEFAULT_CONFIG: SystemConfig = {
   apiKeyOverride: process.env.API_KEY_OVERRIDE || "",
   telegramToken: process.env.TELEGRAM_TOKEN || "",
   telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
-  telegramEnabled: process.env.TELEGRAM_ENABLED === "true"
+  telegramEnabled: process.env.TELEGRAM_ENABLED === "true",
+  facebookPageId: process.env.FACEBOOK_PAGE_ID || "",
+  facebookPageAccessToken: process.env.FACEBOOK_PAGE_ACCESS_TOKEN || "",
+  facebookEnabled: process.env.FACEBOOK_ENABLED === "true"
 };
 
 // Database Initialization Helper
@@ -265,36 +268,9 @@ function loadDb() {
     const parsed = JSON.parse(data);
     // Backward compatibility check
     if (!parsed.articles) parsed.articles = [];
-    if (!parsed.sources) {
+    if (!parsed.sources || parsed.sources.length === 0) {
       parsed.sources = DEFAULT_SOURCES;
-    } else {
-      // Automatic migration: If the database contains old sources (e.g. punchng, vanguardngr, subpaths), replace with new default sources
-      const containsOldSources = parsed.sources.some((s: any) => 
-        s && (
-          s.id === "punchng" || 
-          s.id === "arisetv" || 
-          s.id === "nairametrics" || 
-          s.id === "businessdayng" || 
-          s.id === "vanguardngr-national" ||
-          s.id === "vanguardngr-politics" ||
-          s.id === "tvcnews-politics" ||
-          s.id === "dailytrust-news" ||
-          s.id === "dailytrust-politics" ||
-          (s.id && typeof s.id === "string" && s.id.includes("channelstv")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("vanguardngr")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("topics/news")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("topics/politics")) ||
-          (s.url && typeof s.url === "string" && s.url.includes("category/politics-news")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("vanguardngr")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("topics/news")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("topics/politics")) ||
-          (s.feedUrl && typeof s.feedUrl === "string" && s.feedUrl.includes("category/politics-news"))
-        )
-      );
-      if (containsOldSources || parsed.sources.length !== DEFAULT_SOURCES.length) {
-        parsed.sources = DEFAULT_SOURCES;
-        fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2));
-      }
+      fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2));
     }
     if (!parsed.config) {
       parsed.config = { ...DEFAULT_CONFIG };
@@ -568,6 +544,52 @@ async function sendTelegramMessage(config: SystemConfig, body: string): Promise<
     return true;
   } catch (err: any) {
     addLog("error", `Telegram networking failure for "${chatId}": ${err.message}`, "system");
+    return false;
+  }
+}
+
+// Facebook Page Publisher Notifier
+async function sendFacebookPagePost(config: SystemConfig, title: string, summary: string, wpId: string): Promise<boolean> {
+  if (!config.facebookEnabled) {
+    return false;
+  }
+  if (!config.facebookPageId || !config.facebookPageAccessToken) {
+    addLog("warn", "Facebook alerts are enabled but Page ID or Page Access Token is empty.", "system");
+    return false;
+  }
+
+  const pageId = String(config.facebookPageId).trim();
+  const token = String(config.facebookPageAccessToken).trim();
+
+  const wpUrl = config.wordpressUrl.endsWith('/') ? config.wordpressUrl : `${config.wordpressUrl}/`;
+  const postUrl = `${wpUrl}?p=${wpId}`;
+  
+  const excerpt = summary || "Read the latest news update on SaaMedia.";
+  const postMessage = `${title}\n\n${excerpt}\n\n${postUrl}`;
+
+  try {
+    addLog("info", `Attempting to post news notification to Facebook Page ID: "${pageId}"...`, "system");
+
+    const url = `https://graph.facebook.com/v18.0/${pageId}/feed`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: postMessage,
+        access_token: token
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      addLog("error", `Facebook Page posting failed for Page ID "${pageId}" (status ${response.status}): ${errText}`, "system");
+      return false;
+    }
+
+    addLog("success", `Successfully posted news notification to Facebook Page: "${pageId}"`, "system");
+    return true;
+  } catch (err: any) {
+    addLog("error", `Facebook networking failure for Page ID "${pageId}": ${err.message}`, "system");
     return false;
   }
 }
@@ -1777,6 +1799,21 @@ async function autoPublishFreshArticles() {
         addLog("error", `Telegram Notify Failed: ${tgErr.message}`, "system");
       }
 
+      try {
+        if (config.facebookEnabled) {
+          const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId);
+          article.facebookSent = fbSuccess;
+          article.facebookError = fbSuccess ? null : "Failed to send (check logs)";
+        } else {
+          article.facebookSent = false;
+          article.facebookError = null;
+        }
+      } catch (fbErr: any) {
+        article.facebookSent = false;
+        article.facebookError = fbErr.message;
+        addLog("error", `Facebook Notify Failed: ${fbErr.message}`, "system");
+      }
+
     } catch (pubErr: any) {
       article.status = "failed";
       article.publishError = pubErr.message;
@@ -2127,6 +2164,21 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
       article.telegramSent = false;
       article.telegramError = e.message;
       addLog("error", `Telegram failed during manual post trigger: ${e.message}`, "system");
+    }
+
+    try {
+      if (config.facebookEnabled) {
+        const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId);
+        article.facebookSent = fbSuccess;
+        article.facebookError = fbSuccess ? null : "Failed to send (check logs)";
+      } else {
+        article.facebookSent = false;
+        article.facebookError = null;
+      }
+    } catch (e: any) {
+      article.facebookSent = false;
+      article.facebookError = e.message;
+      addLog("error", `Facebook failed during manual post trigger: ${e.message}`, "system");
     }
 
   } catch (err: any) {

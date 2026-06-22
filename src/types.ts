@@ -15,6 +15,8 @@ export interface Article {
   whatsappError: string | null;
   telegramSent?: boolean;
   telegramError?: string | null;
+  facebookSent?: boolean;
+  facebookError?: string | null;
   publishError: string | null;
   featuredImage?: string | null;
   isEnriched?: boolean;
@@ -54,4 +56,7 @@ export interface SystemConfig {
   telegramToken?: string;
   telegramChatId?: string;
   telegramEnabled?: boolean;
+  facebookPageId?: string;
+  facebookPageAccessToken?: string;
+  facebookEnabled?: boolean;
 }

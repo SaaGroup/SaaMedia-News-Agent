@@ -65,7 +65,10 @@ export default function App() {
     apiKeyOverride: "",
     telegramToken: "",
     telegramChatId: "",
-    telegramEnabled: false
+    telegramEnabled: false,
+    facebookPageId: "",
+    facebookPageAccessToken: "",
+    facebookEnabled: false
   });
   
   // Stats summary state
@@ -1164,6 +1167,24 @@ export default function App() {
                                 )}
                               </span>
                             )}
+
+                            {(config.facebookEnabled || article.facebookSent) && (
+                              <span className="flex items-center gap-1.5">
+                                {article.facebookSent ? (
+                                  <span className="flex items-center gap-1 text-indigo-400">
+                                    <Send className="h-3.5 w-3.5 text-indigo-400" /> Facebook Posted
+                                  </span>
+                                ) : article.facebookError ? (
+                                  <span className="flex items-center gap-1 text-rose-450" title={article.facebookError}>
+                                    ⚠️ Facebook Fail
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-500">
+                                    👥 Facebook Pending
+                                  </span>
+                                )}
+                              </span>
+                            )}
                             <span>Published {article.publishedAt ? new Date(article.publishedAt).toLocaleString() : ""}</span>
                           </div>
                         </div>
@@ -1783,6 +1804,70 @@ export default function App() {
                           </div>
                           <p className="text-[10.5px] text-slate-300 leading-relaxed font-mono">
                             For Telegram to work, you <strong>MUST add your Bot as an Administrator</strong> to your channel or group and allow it to <strong>Post Messages</strong>. If the bot is not an admin, Telegram will reject incoming alerts.
+                          </p>
+                        </div>
+                      </motion.div>
+                    )}
+                  </div>
+
+                  {/* FACEBOOK BROADCAST CHANNELS */}
+                  <div className="bg-[#111625] border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-xl">
+                    <div className="flex items-center justify-between pb-1">
+                      <div className="space-y-0.5">
+                        <span className="text-xs font-semibold text-slate-200 font-display">Enable Facebook Page Broadcast</span>
+                        <p className="text-[10.5px] text-slate-450 leading-relaxed">
+                          SaaMedia will automatically post newly published news directly to your admin Facebook Page.
+                        </p>
+                      </div>
+                      <label className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={activeConfig.facebookEnabled || false}
+                          onChange={(e) => setLocalConfig({ ...activeConfig, facebookEnabled: e.target.checked })}
+                          className="sr-only peer"
+                        />
+                        <div className="w-11 h-6 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                      </label>
+                    </div>
+
+                    {activeConfig.facebookEnabled && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        className="space-y-4 pt-3 border-t border-slate-800/60"
+                      >
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">Facebook Page ID *</label>
+                            <input
+                              type="text"
+                              value={activeConfig.facebookPageId || ""}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, facebookPageId: e.target.value })}
+                              placeholder="e.g., 102345678901234"
+                              className="w-full text-xs font-mono bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                            />
+                            <p className="text-[10px] text-slate-455 mt-1 font-mono">Located in your Facebook Page "About" info tab under "Page transparency" or Page ID.</p>
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">Facebook Page Access Token *</label>
+                            <input
+                              type="password"
+                              value={activeConfig.facebookPageAccessToken || ""}
+                              onChange={(e) => setLocalConfig({ ...activeConfig, facebookPageAccessToken: e.target.value })}
+                              placeholder="EAAGxxxxx..."
+                              className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-3 py-2.5 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                            />
+                            <p className="text-[10px] text-slate-455 mt-1 font-mono">Acquire a permanent Page Access Token from the Facebook Developer Portal (Meta Graph API Explorer with <code>pages_manage_posts</code> and <code>pages_read_engagement</code> permissions).</p>
+                          </div>
+                        </div>
+
+                        <div className="bg-[#1C2333]/90 border border-indigo-500/20 rounded-xl p-3.5 space-y-1">
+                          <div className="text-[11px] text-indigo-400 font-bold font-mono tracking-wider flex items-center gap-1.5 uppercase">
+                            👥 Facebook Page Publisher Format
+                          </div>
+                          <p className="text-[10.5px] text-slate-300 leading-relaxed font-mono">
+                            Auto-posted notifications will follow the requested style: Title, followed by Excerpt (Summary), followed by direct post link on saamedia.com.ng. Make sure your Meta App is live with matching permissions.
                           </p>
                         </div>
                       </motion.div>
