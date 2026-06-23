@@ -548,8 +548,119 @@ async function sendTelegramMessage(config: SystemConfig, body: string): Promise<
   }
 }
 
+// HTML and Entity Decoders for clean social publishing
+function decodeAndCleanHtml(text: string | null | undefined): string {
+  if (!text) return "";
+  
+  // Strip any HTML tags
+  let cleaned = text.replace(/<\/?[^>]+(>|$)/g, "");
+
+  // Decode common HTML entities
+  const entities: { [key: string]: string } = {
+    "&nbsp;": " ",
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&quot;": '"',
+    "&#39;": "'",
+    "&#039;": "'",
+    "&rsquo;": "'",
+    "&lsquo;": "'",
+    "&rdquo;": '"',
+    "&ldquo;": '"',
+    "&mdash;": "—",
+    "&ndash;": "–",
+    "&#8216;": "'",
+    "&#8217;": "'",
+    "&#8218;": "'",
+    "&#8220;": '"',
+    "&#8221;": '"',
+    "&#8222;": '"',
+    "&#8230;": "...",
+    "&hellip;": "...",
+    "&#38;": "&",
+    "&#8211;": "–",
+    "&#8212;": "—",
+    "&#038;": "&",
+    "&#233;": "é",
+    "&#225;": "á",
+    "&#237;": "í",
+    "&#243;": "ó",
+    "&#250;": "ú",
+    "&#241;": "ñ"
+  };
+
+  for (const [entity, replacement] of Object.entries(entities)) {
+    const regex = new RegExp(entity, "g");
+    cleaned = cleaned.replace(regex, replacement);
+  }
+
+  // Handle generic decimal/hex entities using regex
+  cleaned = cleaned.replace(/&#(\d+);/g, (match, dec) => {
+    return String.fromCharCode(parseInt(dec, 10));
+  });
+  cleaned = cleaned.replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => {
+    return String.fromCharCode(parseInt(hex, 16));
+  });
+
+  return cleaned.trim();
+}
+
+function getFirstParagraph(html: string | null | undefined, fallback: string): string {
+  if (!html) return decodeAndCleanHtml(fallback);
+
+  // Parse paragraphs by looking for <p> blocks
+  const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+  let matches: string[] = [];
+  let match;
+  while ((match = pRegex.exec(html)) !== null) {
+    const text = decodeAndCleanHtml(match[1]);
+    if (text) {
+      matches.push(text);
+    }
+  }
+
+  // If we found a valid paragraph, pick the first one
+  if (matches.length > 0) {
+    for (const paragraph of matches) {
+      const cleaned = decodeAndCleanHtml(paragraph);
+      // Ensure the paragraph is of substantial length and doesn't contain source site promotion or media markup
+      if (cleaned.length > 15 && !cleaned.includes("dailytrust.com") && !cleaned.includes("tvcnews.tv") && !cleaned.includes("<img")) {
+        return cleaned;
+      }
+    }
+  }
+
+  // Fallback split by lines
+  const lines = html.split(/[\r\n]+/);
+  for (const line of lines) {
+    const cleanedLine = decodeAndCleanHtml(line);
+    if (cleanedLine.length > 20 && !cleanedLine.includes("<img") && !cleanedLine.includes("dailytrust.com") && !cleanedLine.includes("tvcnews.tv")) {
+      return cleanedLine;
+    }
+  }
+
+  return decodeAndCleanHtml(fallback);
+}
+
+function truncateText(text: string, maxLength: number = 380): string {
+  if (text.length <= maxLength) return text;
+  const truncated = text.substring(0, maxLength);
+  const lastSpace = truncated.lastIndexOf(" ");
+  if (lastSpace > maxLength * 0.7) {
+    return truncated.substring(0, lastSpace) + "...";
+  }
+  return truncated + "...";
+}
+
 // Facebook Page Publisher Notifier
-async function sendFacebookPagePost(config: SystemConfig, title: string, summary: string, wpId: string): Promise<boolean> {
+async function sendFacebookPagePost(
+  config: SystemConfig, 
+  title: string, 
+  summary: string, 
+  wpId: string, 
+  contentHtml?: string | null
+): Promise<boolean> {
   if (!config.facebookEnabled) {
     return false;
   }
@@ -564,20 +675,29 @@ async function sendFacebookPagePost(config: SystemConfig, title: string, summary
   const wpUrl = config.wordpressUrl.endsWith('/') ? config.wordpressUrl : `${config.wordpressUrl}/`;
   const postUrl = `${wpUrl}?p=${wpId}`;
   
-  const excerpt = summary || "Read the latest news update on SaaMedia.";
-  const postMessage = `${title}\n\n${excerpt}\n\n${postUrl}`;
+  // Format Title: UPPERCASE and distinct layout
+  const cleanTitle = decodeAndCleanHtml(title).toUpperCase();
+
+  // Extract cleaned first paragraph from full WordPress HTML post if present, otherwise use summary fallback
+  const rawParagraph = getFirstParagraph(contentHtml, summary);
+  const cleanParagraph = truncateText(rawParagraph, 380);
+
+  // Construct message using requested format - no original source links, clean layout!
+  const postMessage = `${cleanTitle}\n\n${cleanParagraph}\n\n📰 Read the full story here:\n${postUrl}`;
 
   try {
     addLog("info", `Attempting to post news notification to Facebook Page ID: "${pageId}"...`, "system");
 
     const url = `https://graph.facebook.com/v18.0/${pageId}/feed`;
+    const params = new URLSearchParams();
+    params.append("message", postMessage);
+    params.append("link", postUrl); // Pass link parameter to automatically render a preview of the featured image and the SaaMedia post
+    params.append("access_token", token);
+
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: postMessage,
-        access_token: token
-      })
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: params
     });
 
     if (!response.ok) {
@@ -595,9 +715,9 @@ async function sendFacebookPagePost(config: SystemConfig, title: string, summary
 }
 
 // WhatsApp Notifier Implementation
-async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<boolean> {
+async function sendWhatsAppMessage(config: SystemConfig, body: string, featuredImage?: string | null): Promise<boolean> {
   if (config.whatsappGateway === "mock") {
-    addLog("success", `WhatsApp Alerts Simulation [To: ${config.whatsappRecipient}]: "${body}"`, "whatsapp");
+    addLog("success", `WhatsApp Alerts Simulation [To: ${config.whatsappRecipient}]: "${body}"${featuredImage ? ` (Image: ${featuredImage})` : ""}`, "whatsapp");
     return true;
   }
 
@@ -612,6 +732,9 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
     params.append("From", `whatsapp:${config.whatsappSenderNumber}`);
     params.append("To", `whatsapp:${config.whatsappRecipient}`);
     params.append("Body", body);
+    if (featuredImage) {
+      params.append("MediaUrl", featuredImage);
+    }
 
     const res = await fetch(url, {
       method: "POST",
@@ -639,6 +762,7 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
       body: JSON.stringify({
         recipient: config.whatsappRecipient,
         message: body,
+        featuredImage: featuredImage || null,
         timestamp: new Date().toISOString()
       })
     });
@@ -692,9 +816,24 @@ async function sendWhatsAppMessage(config: SystemConfig, body: string): Promise<
         }
       }
 
-      addLog("info", `Sending WhatsApp Web Alert to chat: ${recipientId}`, "whatsapp");
-      await whatsappClient.sendMessage(recipientId, { text: body });
-      return true;
+      if (featuredImage) {
+        try {
+          addLog("info", `Sending WhatsApp Web Alert directly with Image Media to chat: ${recipientId}`, "whatsapp");
+          await whatsappClient.sendMessage(recipientId, { 
+            image: { url: featuredImage }, 
+            caption: body 
+          });
+          return true;
+        } catch (mediaErr: any) {
+          addLog("warn", `Could not deliver WhatsApp image media, falling back to text-only: ${mediaErr.message}`, "whatsapp");
+          await whatsappClient.sendMessage(recipientId, { text: body });
+          return true;
+        }
+      } else {
+        addLog("info", `Sending WhatsApp Web Alert via text-only to chat: ${recipientId}`, "whatsapp");
+        await whatsappClient.sendMessage(recipientId, { text: body });
+        return true;
+      }
     } catch (err: any) {
       addLog("error", `WhatsApp Web Send Error: ${err.message}`, "whatsapp");
       throw new Error(`WhatsApp Web Delivery Failed: ${err.message}`);
@@ -1772,11 +1911,15 @@ async function autoPublishFreshArticles() {
       addLog("success", `Successfully published to WordPress! ID: ${wpId}`, "publisher");
 
       // Step C: Send WhatsApp and Telegram Notifiers
-      const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
+      const cleanTitle = decodeAndCleanHtml(article.title);
+      const rawParagraph = getFirstParagraph(article.content, article.summary);
+      const cleanParagraph = truncateText(rawParagraph, 300);
+
+      const msgBody = `📰 *SaaMedia News Update*\n\n*${cleanTitle}*\n\n${cleanParagraph}\n\nLink: https://saamedia.com.ng/?p=${wpId}`;
       addLog("info", `Dispatching alert notifications to enabled gateways...`, "system");
 
       try {
-        const waSuccess = await sendWhatsAppMessage(config, msgBody);
+        const waSuccess = await sendWhatsAppMessage(config, msgBody, article.featuredImage);
         article.whatsappSent = waSuccess;
       } catch (waErr: any) {
         article.whatsappSent = false;
@@ -1801,7 +1944,7 @@ async function autoPublishFreshArticles() {
 
       try {
         if (config.facebookEnabled) {
-          const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId);
+          const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId, article.content);
           article.facebookSent = fbSuccess;
           article.facebookError = fbSuccess ? null : "Failed to send (check logs)";
         } else {
@@ -2140,9 +2283,13 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     addLog("success", `Article force-published to WordPress successfully! WP ID: ${wpId}`, "publisher");
 
     // 3. WhatsApp and Telegram Alerts dispatch
-    const msgBody = `📰 *SaaMedia News Update*\n\nTitle: *${article.title}*\nLink: https://saamedia.com.ng/?p=${wpId}`;
+    const cleanTitle = decodeAndCleanHtml(article.title);
+    const rawParagraph = getFirstParagraph(article.content, article.summary);
+    const cleanParagraph = truncateText(rawParagraph, 300);
+
+    const msgBody = `📰 *SaaMedia News Update*\n\n*${cleanTitle}*\n\n${cleanParagraph}\n\nLink: https://saamedia.com.ng/?p=${wpId}`;
     try {
-      const waSuccess = await sendWhatsAppMessage(config, msgBody);
+      const waSuccess = await sendWhatsAppMessage(config, msgBody, article.featuredImage);
       article.whatsappSent = waSuccess;
       article.whatsappError = null;
     } catch (e: any) {
@@ -2168,7 +2315,7 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
 
     try {
       if (config.facebookEnabled) {
-        const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId);
+        const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId, article.content);
         article.facebookSent = fbSuccess;
         article.facebookError = fbSuccess ? null : "Failed to send (check logs)";
       } else {
