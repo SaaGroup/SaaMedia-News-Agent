@@ -506,6 +506,7 @@ export default function App() {
   // Filter queues
   const reviewQueue = articles.filter(a => a.status === "scraped" || a.status === "approved" || a.status === "failed" || a.status === "publishing");
   const publishedArchive = articles.filter(a => a.status === "published");
+  const successRate = stats.totalScraped > 0 ? Math.round((stats.totalPublished / stats.totalScraped) * 100) : 0;
 
   return (
     <div className="min-h-screen bg-[#0B0F1A] font-sans text-slate-100 flex flex-col p-4 sm:p-6 md:p-8">
@@ -582,7 +583,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto w-full flex-grow flex flex-col">
         
         {/* METRICS GRID WITH PURPOSEFUL BENTO LAYOUT AND rhythm */}
-        <section id="metrics-grid" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 mb-8">
+        <section id="metrics-grid" className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-5 mb-8">
           
           <div className="bg-[#162033]/90 rounded-2xl p-5 border border-slate-700/50 flex flex-col justify-between hover:border-slate-655 transition-all group shadow-sm hover:shadow">
             <div className="flex justify-between items-start">
@@ -603,6 +604,15 @@ export default function App() {
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
               Auto-synced and approved
             </div>
+          </div>
+
+          <div className="bg-[#162033]/90 rounded-2xl p-5 border border-slate-700/50 flex flex-col justify-between hover:border-slate-655 transition-all group shadow-sm hover:shadow">
+            <div className="flex justify-between items-start">
+              <span className="text-slate-400 text-xs font-semibold uppercase tracking-wider font-mono">Publishing Success</span>
+              <span className="text-emerald-400 bg-emerald-400/10 px-2 py-0.5 rounded text-[10px] font-bold font-mono">Rate</span>
+            </div>
+            <div className="text-5xl font-black text-white my-3 group-hover:scale-[1.02] transition-transform">{successRate}%</div>
+            <div className="text-xs text-slate-400">Ratio of published articles vs scraped attempts</div>
           </div>
 
           <div className="bg-[#162033]/90 rounded-2xl p-5 border border-slate-700/50 flex flex-col justify-between hover:border-slate-655 transition-all group shadow-sm hover:shadow">

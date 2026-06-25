@@ -1,0 +1,72 @@
+{
+  "articles": [],
+  "sources": [
+    {
+      "id": "dailytrust-home",
+      "name": "DailyTrust Home",
+      "url": "https://dailytrust.com/",
+      "type": "National",
+      "feedUrl": "https://dailytrust.com/",
+      "enabled": true
+    },
+    {
+      "id": "tvcnews-home",
+      "name": "TVC News Home",
+      "url": "https://www.tvcnews.tv/",
+      "type": "Politics",
+      "feedUrl": "https://www.tvcnews.tv/",
+      "enabled": true
+    }
+  ],
+  "config": {
+    "wordpressUrl": "https://saamedia.com.ng",
+    "wordpressUsername": "admin",
+    "wordpressPassword": "",
+    "wordpressMode": "rest",
+    "whatsappRecipient": "+2348000000000",
+    "whatsappGateway": "mock",
+    "whatsappSenderNumber": "+14155238886",
+    "whatsappAccountSid": "",
+    "whatsappApiKey": "",
+    "schedulerIntervalMins": 180,
+    "schedulerEnabled": true,
+    "apiKeyOverride": ""
+  },
+  "logs": [
+    {
+      "id": "kerym1t",
+      "timestamp": "2026-06-19T16:14:17.207Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 180 minutes.",
+      "section": "system"
+    },
+    {
+      "id": "j8h7nzt",
+      "timestamp": "2026-06-18T16:36:40.483Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "section": "system"
+    },
+    {
+      "id": "a1jg2ar",
+      "timestamp": "2026-06-18T16:33:47.194Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "section": "system"
+    },
+    {
+      "id": "ffwhkfy",
+      "timestamp": "2026-06-18T16:33:41.812Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "section": "system"
+    },
+    {
+      "id": "ed93has",
+      "timestamp": "2026-06-18T16:25:25.073Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "section": "system"
+    }
+  ]
+}

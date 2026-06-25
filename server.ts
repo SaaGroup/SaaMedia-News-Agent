@@ -653,6 +653,68 @@ function truncateText(text: string, maxLength: number = 380): string {
   return truncated + "...";
 }
 
+function cleanFirstParagraphsHtml(contentHtml: string, title: string): string {
+  if (!contentHtml) return "";
+
+  const cleanTitle = title.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  let html = contentHtml.trim();
+  let changed = true;
+
+  for (let iter = 0; iter < 5 && changed; iter++) {
+    changed = false;
+    
+    const tagMatch = html.match(/^<([a-zA-Z0-9]+)[^>]*>([\s\S]*?)<\/\1>/i);
+    if (!tagMatch) break;
+
+    const fullTag = tagMatch[0];
+    const tagName = tagMatch[1].toLowerCase();
+    const innerContent = tagMatch[2];
+
+    // If it contains an image, iframe, or other media, do not remove it, and stop processing
+    if (innerContent.includes("<img") || innerContent.includes("<iframe") || innerContent.includes("<video")) {
+      break;
+    }
+
+    const cleanText = decodeAndCleanHtml(innerContent).trim();
+    const cleanTextLower = cleanText.toLowerCase();
+
+    let shouldRemove = false;
+
+    // 1. Same as the title (or extremely similar/contained within)
+    const normalizedText = cleanTextLower.replace(/[^a-z0-9]/g, "");
+    if (normalizedText === cleanTitle || normalizedText === "" || (normalizedText.length > 5 && cleanTitle.includes(normalizedText))) {
+      shouldRemove = true;
+    }
+
+    // 2. Contains words like "Top News", "BREAKING", "Nigerian News"
+    if (
+      /^(top news|breaking|breaking news|nigerian news|news|update|just in|trending)$/i.test(cleanText) ||
+      cleanTextLower.includes("top news") ||
+      cleanTextLower.includes("breaking news") ||
+      cleanTextLower.includes("nigerian news")
+    ) {
+      shouldRemove = true;
+    }
+
+    // 3. Any tag words using or starting with '#' (hashtags)
+    if (cleanText.includes("#") && cleanText.split(/\s+/).every(word => word.startsWith("#") || word.trim() === "")) {
+      shouldRemove = true;
+    }
+
+    // 4. Any other short words (less than 25 characters) as the first paragraph
+    if (cleanText.length < 25 && tagName === "p") {
+      shouldRemove = true;
+    }
+
+    if (shouldRemove) {
+      html = html.substring(fullTag.length).trim();
+      changed = true;
+    }
+  }
+
+  return html;
+}
+
 // Facebook Page Publisher Notifier
 async function sendFacebookPagePost(
   config: SystemConfig, 
@@ -1375,8 +1437,8 @@ INSTRUCTIONS:
    - UNLIMITED LENGTH MANDATE: You MUST make the news story unlimited in character or word count. No matter how long the original news story or article is, it must be fully translated/recreated without any truncating, shortening, condensing, summarizing, or abbreviation. Every single original paragraph, fact, direct/indirect quote, background context, sub-details, and list item must be preserved at full narrative length. Output the complete unabridged narrative.
    - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
    - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
-   - You MUST embed the elected Featured Image at the absolute top of the article contentHtml.
-   - If the original article crawled images list is empty, or only contains unusable URLs, you MUST select one of these highly relevant high-resolution photo URLs based on your category:
+   - IMPORTANT IMAGE DUPLICATION RULE: You MUST NOT embed the elected Featured Image anywhere inside the article contentHtml body string. This is crucial because WordPress automatically displays the Featured Image at the top of the post on saamedia.com.ng. Placing it inside contentHtml would cause duplicate images on the webpage.
+   - If the original article crawled images list is empty, or only contains unusable URLs, you MUST select one of these highly relevant high-resolution photo URLs based on your category as the featuredImage (but still do NOT embed it inside contentHtml):
      * Politics / National Policy:
        https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?q=80&w=1000&auto=format&fit=crop
        https://images.unsplash.com/photo-1529107386315-e1a2ed48a620?q=80&w=1000&auto=format&fit=crop
@@ -1391,13 +1453,10 @@ INSTRUCTIONS:
        https://images.unsplash.com/photo-1557597774-9d273605dfa9?q=80&w=1000&auto=format&fit=crop
        https://images.unsplash.com/photo-1450133064473-71024230f91b?q=80&w=1000&auto=format&fit=crop
      
-     Embed the elected featured image beautifully like:
-     <p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="SELECTED_FEATURED_IMAGE" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>
-     
-     - You MUST contextually loop and embed ALL secondary supporting images (from the Crawled Media Assets list) sequentially inside the news story between paragraphs to enrich the visual structure of the article:
+   - You MUST contextually loop and embed secondary supporting images (from the Crawled Media Assets list, EXCLUDING the one chosen as the featuredImage) sequentially inside the news story between paragraphs to enrich the visual structure of the article:
      <p align="center" style="margin: 25px 0;"><img class="aligncenter" src="SECONDARY_IMAGE_URL" alt="News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>
      
-     - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
+   - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
      
    - Do NOT append any news source partner credits, back links, reference footers, or footnote/citation blocks at the bottom of the article. Focus entirely on the human-like editorial storytelling text.
    - STRICTOR EXCLUSIONS: You MUST absolutely avoid, skip, and delete any Google adverts, window.googletag script tags or plain code left-overs, premium domains investing advertisements, WhatsApp community prompts, DailyTrust or TVC News source breadcrumbs, "ADVERTISEMENT", "ALSO READ", "READ MORE" labels/headlines, and any inline related posts, news, or articles links/sections from the news content.
@@ -1410,7 +1469,7 @@ Respond strictly in valid JSON format matching this schema:
   "summary": "1-2 sentence quick news summary for WhatsApp or mobile grids",
   "category": "One of: Politics, Business, Security, Economy, National",
   "featuredImage": "Selected image URL string representing featured image",
-  "contentHtml": "HTML string containing the full-length news content with embedded images and credit footer at the bottom"
+  "contentHtml": "HTML string containing the full-length news content with secondary embedded images only (DO NOT include the featured image inside contentHtml) and do NOT append any credit footers"
 }
 
 Ensure your response is valid JSON and only returns the JSON block. Do not wrap it in markdown codeblocks like \`\`\`json.`;
@@ -1451,11 +1510,15 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
     addLog("success", `Editorial AI Agent generated article successfully. Title: ${parsed.title}, Category: ${parsed.category}`, "summarizer");
     
     let finalContentHtml = parsed.contentHtml || `<p>${originalSnippet}</p>`;
-    if (articleUrl && sourceName && !finalContentHtml.includes("originally reported by") && !finalContentHtml.includes("media partner")) {
+    
+    // Clean up unneeded first paragraphs
+    finalContentHtml = cleanFirstParagraphsHtml(finalContentHtml, parsed.title || originalTitle);
+
+    if (articleUrl && sourceName && !finalContentHtml.includes("News Credit to") && !finalContentHtml.includes("media partner")) {
       finalContentHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-  This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
+<p>
+ News Credit to our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
 </p>`;
     }
 
@@ -1474,20 +1537,31 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
     if (paragraphs.length <= 1) {
       paragraphs = textToAnalyze.split("\n").map(p => p.trim()).filter(Boolean);
     }
-    let fallbackHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
+    
+    // Support embedding secondary images sequentially!
+    let fallbackHtml = "";
+    paragraphs.forEach((p, idx) => {
+      fallbackHtml += `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>\n`;
+      if (idx > 0 && idx % 2 === 0 && imagesFound.length > 0) {
+        const imgIdx = (Math.floor(idx / 2)) % imagesFound.length;
+        const inlineImg = imagesFound[imgIdx];
+        if (inlineImg && inlineImg !== crawlerFeaturedImage) {
+          fallbackHtml += `<p align="center" style="margin: 25px 0;"><img class="aligncenter" src="${inlineImg}" alt="Inline News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>\n`;
+        }
+      }
+    });
+
     if (!fallbackHtml || fallbackHtml.trim() === "" || fallbackHtml.trim() === "<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'></p>") {
       fallbackHtml = `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${originalSnippet}</p>`;
     }
 
-    if (crawlerFeaturedImage) {
-      fallbackHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawlerFeaturedImage}" alt="${originalTitle}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + fallbackHtml;
-    }
+    fallbackHtml = cleanFirstParagraphsHtml(fallbackHtml, originalTitle);
 
-    if (articleUrl && sourceName && !fallbackHtml.includes("originally reported by") && !fallbackHtml.includes("media partner")) {
+    if (articleUrl && sourceName && !fallbackHtml.includes("News Credit to") && !fallbackHtml.includes("media partner")) {
       fallbackHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-  This news development was originally reported by our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
+<p>
+ News Credit to our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
 </p>`;
     }
 
@@ -1775,15 +1849,17 @@ async function scrapeAndAutoProcess() {
                 }
               });
 
+              // Apply the cleaning!
+              draftHtml = cleanFirstParagraphsHtml(draftHtml, item.title);
+
               if (crawl.featuredImage) {
-                draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
                 finalFeaturedImage = crawl.featuredImage;
               }
               if (item.link && source.name) {
                 draftHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-  This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+<p>
+ News Credit to our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
 </p>`;
               }
               finalContent = draftHtml;
@@ -1814,15 +1890,17 @@ async function scrapeAndAutoProcess() {
               }
             });
 
+            // Apply the cleaning!
+            draftHtml = cleanFirstParagraphsHtml(draftHtml, item.title);
+
             if (crawl.featuredImage) {
-              draftHtml = `<p align="center" style="margin-bottom: 25px;"><img class="aligncenter size-full" src="${crawl.featuredImage}" alt="${item.title}" style="max-width:100%; height:auto; border-radius:12px; box-shadow: 0 4px 10px rgba(0,0,0,0.15);" /></p>\n` + draftHtml;
               finalFeaturedImage = crawl.featuredImage;
             }
             if (item.link && source.name) {
               draftHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p style="font-size: 13px; color: #475569; font-style: italic; margin-top: 15px; line-height: 1.6;">
-  This news development was originally reported by our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+<p>
+ News Credit to our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
 </p>`;
             }
             finalContent = draftHtml;
