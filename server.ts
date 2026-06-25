@@ -1453,10 +1453,10 @@ INSTRUCTIONS:
        https://images.unsplash.com/photo-1557597774-9d273605dfa9?q=80&w=1000&auto=format&fit=crop
        https://images.unsplash.com/photo-1450133064473-71024230f91b?q=80&w=1000&auto=format&fit=crop
      
-   - You MUST contextually loop and embed secondary supporting images (from the Crawled Media Assets list, EXCLUDING the one chosen as the featuredImage) sequentially inside the news story between paragraphs to enrich the visual structure of the article:
-     <p align="center" style="margin: 25px 0;"><img class="aligncenter" src="SECONDARY_IMAGE_URL" alt="News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>
+   - STRICTOR NO-INLINE-IMAGES MANDATE: You MUST NOT embed any images, photos, or media tags (neither the elected Featured Image nor any secondary/supporting/inline images) inside the contentHtml string. The contentHtml MUST be purely textual, structured only with standard tags like <p>, <h3>, <strong>, and <em>. This is crucial to keep the news content perfectly clean and avoid duplicate or redundant photos on the saamedia.com.ng post view. All inline images/photos are strictly forbidden!
+
      
-   - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, write HTML properties with single quotes (e.g., <img src='url' style='max-width:100%' />) to avoid unescaped backslash JSON parsing crashes!
+   - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, use single quotes (e.g. style='margin-bottom: 20px;') or escape double quotes properly to avoid unescaped backslash JSON parsing crashes!
      
    - Do NOT append any news source partner credits, back links, reference footers, or footnote/citation blocks at the bottom of the article. Focus entirely on the human-like editorial storytelling text.
    - STRICTOR EXCLUSIONS: You MUST absolutely avoid, skip, and delete any Google adverts, window.googletag script tags or plain code left-overs, premium domains investing advertisements, WhatsApp community prompts, DailyTrust or TVC News source breadcrumbs, "ADVERTISEMENT", "ALSO READ", "READ MORE" labels/headlines, and any inline related posts, news, or articles links/sections from the news content.
@@ -1469,7 +1469,7 @@ Respond strictly in valid JSON format matching this schema:
   "summary": "1-2 sentence quick news summary for WhatsApp or mobile grids",
   "category": "One of: Politics, Business, Security, Economy, National",
   "featuredImage": "Selected image URL string representing featured image",
-  "contentHtml": "HTML string containing the full-length news content with secondary embedded images only (DO NOT include the featured image inside contentHtml) and do NOT append any credit footers"
+  "contentHtml": "HTML string containing the full-length news content as text-only (DO NOT embed any images or inline photos at all) and do NOT append any credit footers"
 }
 
 Ensure your response is valid JSON and only returns the JSON block. Do not wrap it in markdown codeblocks like \`\`\`json.`;
@@ -1538,18 +1538,8 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       paragraphs = textToAnalyze.split("\n").map(p => p.trim()).filter(Boolean);
     }
     
-    // Support embedding secondary images sequentially!
-    let fallbackHtml = "";
-    paragraphs.forEach((p, idx) => {
-      fallbackHtml += `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>\n`;
-      if (idx > 0 && idx % 2 === 0 && imagesFound.length > 0) {
-        const imgIdx = (Math.floor(idx / 2)) % imagesFound.length;
-        const inlineImg = imagesFound[imgIdx];
-        if (inlineImg && inlineImg !== crawlerFeaturedImage) {
-          fallbackHtml += `<p align="center" style="margin: 25px 0;"><img class="aligncenter" src="${inlineImg}" alt="Inline News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>\n`;
-        }
-      }
-    });
+    // Clean, text-only paragraph list (no inline images)
+    let fallbackHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
 
     if (!fallbackHtml || fallbackHtml.trim() === "" || fallbackHtml.trim() === "<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'></p>") {
       fallbackHtml = `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${originalSnippet}</p>`;
@@ -1837,17 +1827,7 @@ async function scrapeAndAutoProcess() {
               if (paragraphs.length <= 1) {
                 paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
               }
-              let draftHtml = "";
-              paragraphs.forEach((p, idx) => {
-                draftHtml += `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>\n`;
-                if (idx > 0 && idx % 2 === 0 && crawl.imageUrls.length > 0) {
-                  const imgIdx = (Math.floor(idx / 2)) % crawl.imageUrls.length;
-                  const inlineImg = crawl.imageUrls[imgIdx];
-                  if (inlineImg && inlineImg !== crawl.featuredImage) {
-                    draftHtml += `<p align="center" style="margin: 25px 0;"><img class="aligncenter" src="${inlineImg}" alt="Inline News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>\n`;
-                  }
-                }
-              });
+              let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
 
               // Apply the cleaning!
               draftHtml = cleanFirstParagraphsHtml(draftHtml, item.title);
@@ -1878,17 +1858,7 @@ async function scrapeAndAutoProcess() {
             if (paragraphs.length <= 1) {
               paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
             }
-            let draftHtml = "";
-            paragraphs.forEach((p, idx) => {
-              draftHtml += `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>\n`;
-              if (idx > 0 && idx % 2 === 0 && crawl.imageUrls.length > 0) {
-                const imgIdx = (Math.floor(idx / 2)) % crawl.imageUrls.length;
-                const inlineImg = crawl.imageUrls[imgIdx];
-                if (inlineImg && inlineImg !== crawl.featuredImage) {
-                  draftHtml += `<p align="center" style="margin: 25px 0;"><img class="aligncenter" src="${inlineImg}" alt="Inline News Image" style="max-width:100%; height:auto; border-radius:8px;" /></p>\n`;
-                }
-              }
-            });
+            let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
 
             // Apply the cleaning!
             draftHtml = cleanFirstParagraphsHtml(draftHtml, item.title);
