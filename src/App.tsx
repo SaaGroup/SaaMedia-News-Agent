@@ -475,6 +475,20 @@ export default function App() {
     } catch (e) {}
   };
 
+  // Purge older logs
+  const handlePurgeLogs = async () => {
+    try {
+      const res = await fetch("/api/logs/purge", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        triggerAlert("success", `Purged ${data.purgedCount || 0} older logs (48h+).`);
+        fetchData();
+      }
+    } catch (e) {
+      triggerAlert("error", "Failed to purge logs.");
+    }
+  };
+
   // Fetch immediately on mount and poll stats every 15 secs
   useEffect(() => {
     fetchData(false);
@@ -1354,12 +1368,20 @@ export default function App() {
                     <p className="text-sm text-slate-400">Live system execution logs tracing RSS parsing, skip verifications, Gemini completions and gateway dispatches.</p>
                   </div>
 
-                  <button
-                    onClick={handleClearLogs}
-                    className="flex items-center gap-1.5 text-xs text-rose-400 hover:text-white hover:bg-rose-950/30 border border-rose-900/40 px-3.5 py-2 rounded-xl font-bold transition-all cursor-pointer"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" /> Clear Record Log
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button
+                      onClick={handlePurgeLogs}
+                      className="flex items-center gap-1.5 text-xs text-amber-400 hover:text-white hover:bg-amber-950/30 border border-amber-900/40 px-3.5 py-2 rounded-xl font-bold transition-all cursor-pointer"
+                    >
+                      Purge Logs &gt; 48h
+                    </button>
+                    <button
+                      onClick={handleClearLogs}
+                      className="flex items-center gap-1.5 text-xs text-rose-400 hover:text-white hover:bg-rose-950/30 border border-rose-900/40 px-3.5 py-2 rounded-xl font-bold transition-all cursor-pointer"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" /> Clear Record Log
+                    </button>
+                  </div>
                 </div>
 
                 <div className="bg-[#0B0F1A] text-slate-250 rounded-2xl overflow-hidden border border-slate-800/80 font-mono shadow-inner text-[11px] md:text-xs">

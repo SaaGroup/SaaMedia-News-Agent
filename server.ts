@@ -303,6 +303,19 @@ function saveDb(db: any) {
 // Log Writer Helper
 function addLog(level: "info" | "warn" | "error" | "success", message: string, section: "scraper" | "summarizer" | "publisher" | "whatsapp" | "system") {
   const db = loadDb();
+  
+  // Purge any log events older than 48 hours (2 days)
+  const cutOffTime = Date.now() - (48 * 60 * 60 * 1000);
+  if (Array.isArray(db.logs)) {
+    db.logs = db.logs.filter((l: any) => {
+      if (!l.timestamp) return true;
+      const logTime = Date.parse(l.timestamp);
+      return !isNaN(logTime) && logTime > cutOffTime;
+    });
+  } else {
+    db.logs = [];
+  }
+
   const log: SystemLog = {
     id: Math.random().toString(36).substring(2, 9),
     timestamp: new Date().toISOString(),
@@ -686,12 +699,15 @@ function cleanFirstParagraphsHtml(contentHtml: string, title: string): string {
       shouldRemove = true;
     }
 
-    // 2. Contains words like "Top News", "BREAKING", "Nigerian News"
+    // 2. Contains words like "Top News", "BREAKING", "Nigerian News", "Uncategorized", "Uncategproze"
     if (
-      /^(top news|breaking|breaking news|nigerian news|news|update|just in|trending)$/i.test(cleanText) ||
+      /^(top news|breaking|breaking news|nigerian news|news|update|just in|trending|uncategorized|uncategproze)$/i.test(cleanText) ||
       cleanTextLower.includes("top news") ||
       cleanTextLower.includes("breaking news") ||
-      cleanTextLower.includes("nigerian news")
+      cleanTextLower.includes("nigerian news") ||
+      cleanTextLower.includes("uncategorized") ||
+      cleanTextLower.includes("uncategproze") ||
+      /^(uncategorized|uncategproze)\b/i.test(cleanTextLower)
     ) {
       shouldRemove = true;
     }
@@ -1123,12 +1139,16 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       }
     }
 
-    // 6. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc.)
+    // 6. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc., and Uncategorized / Uncategproze)
     const isBreadcrumb =
       /^\s*home\s*[>»/|]/i.test(p) ||
       (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
       /^\s*home\s+topics\s+/i.test(p) ||
-      /^\s*home\s+news\s+/i.test(p);
+      /^\s*home\s+news\s+/i.test(p) ||
+      /^\s*(uncategorized|uncategproze)\b/i.test(p) ||
+      lowerP.includes("uncategorized") ||
+      lowerP.includes("uncategproze") ||
+      (lowerP.includes(" > ") && (lowerP.includes("uncategorized") || lowerP.includes("uncategproze")));
     if (isBreadcrumb) {
       continue;
     }
@@ -1776,7 +1796,7 @@ async function scrapeAndAutoProcess() {
         const urlDateObj = new Date(year, month, day);
         if (!isNaN(urlDateObj.getTime())) {
           const urlHoursAgo = (Date.now() - urlDateObj.getTime()) / (1000 * 60 * 60);
-          if (urlHoursAgo > 30) { // allow a small margin for timezones
+          if (urlHoursAgo > 24) { 
             addLog("info", `Skipping "${item.title}" from ${source.name} - URL date indicates it is older than 24 hours.`, "scraper");
             continue;
           }
@@ -2177,7 +2197,33 @@ app.post("/api/sources", (req, res) => {
 
 app.get("/api/logs", (req, res) => {
   const db = loadDb();
+  const cutOffTime = Date.now() - (48 * 60 * 60 * 1000);
+  if (Array.isArray(db.logs)) {
+    db.logs = db.logs.filter((l: any) => {
+      if (!l.timestamp) return true;
+      const logTime = Date.parse(l.timestamp);
+      return !isNaN(logTime) && logTime > cutOffTime;
+    });
+    saveDb(db);
+  }
   res.json(db.logs);
+});
+
+app.post("/api/logs/purge", (req, res) => {
+  const db = loadDb();
+  const cutOffTime = Date.now() - (48 * 60 * 60 * 1000);
+  const initialCount = db.logs.length;
+  if (Array.isArray(db.logs)) {
+    db.logs = db.logs.filter((l: any) => {
+      if (!l.timestamp) return true;
+      const logTime = Date.parse(l.timestamp);
+      return !isNaN(logTime) && logTime > cutOffTime;
+    });
+    saveDb(db);
+  }
+  const purgedCount = initialCount - db.logs.length;
+  addLog("success", `Manually purged ${purgedCount} log events older than 48 hours.`, "system");
+  res.json({ status: "ok", purgedCount });
 });
 
 app.post("/api/logs/clear", (req, res) => {
