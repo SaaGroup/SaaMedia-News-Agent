@@ -1068,6 +1068,26 @@ function isScriptRemnant(text: string): boolean {
   return false;
 }
 
+function countParagraphs(content: string): number {
+  if (!content) return 0;
+  // If it's HTML containing <p> tags, count the valid ones
+  if (/<p\b[^>]*>/i.test(content)) {
+    const matches = content.match(/<p\b[^>]*>([\s\S]*?)<\/p>/gi);
+    if (matches) {
+      return matches
+        .map(m => m.replace(/<\/?[^>]+(>|$)/g, "").trim())
+        .filter(text => text.length > 5) // filter out empty or extremely short paragraph templates
+        .length;
+    }
+  }
+  // Fallback to splitting by newlines
+  return content
+    .split(/\n+/)
+    .map(p => p.trim())
+    .filter(p => p.length > 5)
+    .length;
+}
+
 // Helper to clean scraped news content from DailyTrust or TVC News sources to avoid Google adverts, breadcrumbs, related news, and promotional text.
 function cleanScrapedArticleText(rawText: string, sourceName: string): string {
   if (!rawText) return "";
@@ -1956,6 +1976,28 @@ async function autoPublishFreshArticles() {
       // Step A: Trigger Editorial Agent
       const aiEdit = await runAIElegancyAgent(article.originalTitle, article.content, article.url, article.source);
       
+      const paragraphsCount = countParagraphs(aiEdit.contentHtml);
+      if (paragraphsCount < 2) {
+        article.title = aiEdit.title;
+        article.summary = aiEdit.summary;
+        article.category = aiEdit.category;
+        article.content = aiEdit.contentHtml;
+        article.featuredImage = aiEdit.featuredImage;
+        article.isEnriched = true;
+        
+        article.status = "failed";
+        article.publishError = `Rejected: Content has only ${paragraphsCount} paragraph(s) (minimum 2 paragraphs required to publish).`;
+        addLog("warn", `Skipped Auto-Publishing "${article.title}" - Content has less than 2 paragraphs (${paragraphsCount} found).`, "publisher");
+        
+        const currentDb = loadDb();
+        const idx = currentDb.articles.findIndex((a: any) => a.id === article.id);
+        if (idx !== -1) {
+          currentDb.articles[idx] = article;
+        }
+        saveDb(currentDb);
+        continue;
+      }
+      
       article.title = aiEdit.title;
       article.summary = aiEdit.summary;
       article.category = aiEdit.category;
@@ -2360,6 +2402,22 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
       article.isEnriched = true;
     }
 
+    const paragraphsCount = countParagraphs(article.content);
+    if (paragraphsCount < 2) {
+      article.status = "failed";
+      article.publishError = `Cannot Publish: Content has only ${paragraphsCount} paragraph(s) (minimum is 2).`;
+      
+      const finalDb = loadDb();
+      const fIdx = finalDb.articles.findIndex((a: any) => a.id === id);
+      if (fIdx !== -1) {
+        finalDb.articles[fIdx] = article;
+      }
+      saveDb(finalDb);
+      
+      addLog("warn", `Manual Publish skipped for "${article.title}" - content has only ${paragraphsCount} paragraph(s) (minimum is 2).`, "publisher");
+      return res.status(400).json({ error: `Cannot publish: Content has only ${paragraphsCount} paragraph(s) (minimum 2 paragraphs required).` });
+    }
+
     addLog("info", `Force Publishing Article to WP: ${article.title}`, "publisher");
 
     // 2. Publish
@@ -2454,6 +2512,26 @@ app.delete("/api/articles/:id", (req, res) => {
   }
 
   res.json({ status: "ok" });
+});
+
+// Bulk Delete articles from local list
+app.post("/api/articles/bulk-delete", (req, res) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids)) {
+    return res.status(400).json({ error: "Invalid IDs specified." });
+  }
+
+  const db = loadDb();
+  const originalLength = db.articles.length;
+  db.articles = db.articles.filter((a: Article) => !ids.includes(a.id));
+
+  const deletedCount = originalLength - db.articles.length;
+  if (deletedCount > 0) {
+    saveDb(db);
+    addLog("info", `Bulk deleted ${deletedCount} articles/drafts from review logs.`, "system");
+  }
+
+  res.json({ status: "ok", deletedCount });
 });
 
 // Stats aggregator endpoint

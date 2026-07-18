@@ -123,6 +123,10 @@ export default function App() {
   const [alert, setAlert] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [showManualForm, setShowManualForm] = useState(false);
 
+  // Checkbox Selection States for Bulk Actions
+  const [selectedQueueIds, setSelectedQueueIds] = useState<string[]>([]);
+  const [selectedArchiveIds, setSelectedArchiveIds] = useState<string[]>([]);
+
   // Manual News Submission State
   const [manualTitle, setManualTitle] = useState("");
   const [manualContent, setManualContent] = useState("");
@@ -381,11 +385,51 @@ export default function App() {
         triggerAlert("info", "Article draft purged.");
         fetchData();
         if (editingArticle?.id === id) setEditingArticle(null);
+        setSelectedQueueIds(prev => prev.filter(item => item !== id));
+        setSelectedArchiveIds(prev => prev.filter(item => item !== id));
       } else {
         triggerAlert("error", "Purge request returned negative error code.");
       }
     } catch (e) {
       triggerAlert("error", "Failed to dispatch delete command.");
+    }
+  };
+
+  // Bulk Delete articles from local lists
+  const handleBulkDeleteArticles = async (ids: string[], type: 'queue' | 'archive') => {
+    if (ids.length === 0) {
+      triggerAlert("info", "No articles selected.");
+      return;
+    }
+    const msg = type === 'queue'
+      ? `Are you sure you want to discard these ${ids.length} selected drafts from the SaaMedia review queue?`
+      : `Are you sure you want to purge these ${ids.length} selected published logs? This action only removes local logs and will NOT affect the real articles on saamedia.com.ng.`;
+    
+    if (!confirm(msg)) return;
+
+    try {
+      const res = await fetch("/api/articles/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        triggerAlert("success", `Successfully bulk deleted ${data.deletedCount || 0} items.`);
+        if (type === 'queue') {
+          setSelectedQueueIds([]);
+          if (editingArticle && ids.includes(editingArticle.id)) {
+            setEditingArticle(null);
+          }
+        } else {
+          setSelectedArchiveIds([]);
+        }
+        fetchData();
+      } else {
+        triggerAlert("error", "Bulk delete failed.");
+      }
+    } catch (e) {
+      triggerAlert("error", "Failed to connect to bulk delete service.");
     }
   };
 
@@ -1025,6 +1069,42 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-4">
+                    {/* Bulk Actions Panel for Editorial Queue */}
+                    <div className="bg-[#162033] border border-slate-700/50 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-inner">
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2.5 text-xs font-mono font-medium text-slate-300 uppercase tracking-wider cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={reviewQueue.length > 0 && selectedQueueIds.length === reviewQueue.length}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedQueueIds(reviewQueue.map(a => a.id));
+                              } else {
+                                setSelectedQueueIds([]);
+                              }
+                            }}
+                            className="w-4 h-4 rounded bg-[#0B0F1A] border-slate-700 text-[#008751] focus:ring-[#008751] cursor-pointer accent-[#008751]"
+                          />
+                          Select All Drafts ({reviewQueue.length})
+                        </label>
+
+                        {selectedQueueIds.length > 0 && (
+                          <span className="text-xs text-slate-400 font-mono">
+                            • {selectedQueueIds.length} item(s) selected
+                          </span>
+                        )}
+                      </div>
+
+                      {selectedQueueIds.length > 0 && (
+                        <button
+                          onClick={() => handleBulkDeleteArticles(selectedQueueIds, 'queue')}
+                          className="flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 border border-rose-800/60 text-rose-350 text-xs font-bold rounded-xl transition-all cursor-pointer shadow-sm active:scale-95"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" /> Discard Selected Drafts
+                        </button>
+                      )}
+                    </div>
+
                     {reviewQueue.map((article: Article) => (
                       <motion.div
                         key={article.id}
@@ -1036,44 +1116,61 @@ export default function App() {
                         }`}
                       >
                         <div className="flex items-start justify-between gap-4">
-                          <div className="space-y-2 min-w-0">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-[10px] bg-slate-900/60 text-blue-300 border border-slate-800 px-2 py-0.5 rounded font-mono font-semibold uppercase">
-                                {article.source}
-                              </span>
-                              <span className="text-[10px] bg-slate-900/60 text-green-300 border border-slate-800/80 px-2 py-0.5 rounded font-mono font-semibold uppercase">
-                                {article.category}
-                              </span>
-                              
-                              {article.status === "failed" && (
-                                <span className="text-[10px] flex items-center gap-1 font-mono font-bold uppercase tracking-wider bg-rose-950/60 text-rose-300 border border-rose-900/50 px-2 py-0.5 rounded">
-                                  <AlertCircle className="h-3 w-3 text-rose-400" /> Publishing Failed
-                                </span>
-                              )}
-                              {article.status === "approved" && (
-                                <span className="text-[10px] flex items-center gap-1 font-mono font-bold uppercase tracking-wider bg-emerald-950/60 text-emerald-300 border border-emerald-900/50 px-2 py-0.5 rounded">
-                                  <Check className="h-3 w-3 text-emerald-400" /> Editorial Approved
-                                </span>
-                              )}
-                              
-                              <span className="text-[10px] font-mono text-slate-450">
-                                Sourced {new Date(article.scrapedAt).toLocaleTimeString()}
-                              </span>
+                          <div className="flex items-start gap-3 md:gap-4 flex-grow min-w-0">
+                            <div className="pt-1 select-none shrink-0">
+                              <input
+                                type="checkbox"
+                                checked={selectedQueueIds.includes(article.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedQueueIds(prev => [...prev, article.id]);
+                                  } else {
+                                    setSelectedQueueIds(prev => prev.filter(id => id !== article.id));
+                                  }
+                                }}
+                                className="w-4 h-4 rounded bg-[#0B0F1A] border-slate-700 text-[#008751] focus:ring-[#008751] cursor-pointer accent-[#008751]"
+                              />
                             </div>
 
-                            <h3 className="text-base font-bold text-white tracking-tight leading-snug hover:text-[#008751] transition-colors font-display break-words">
-                              {article.title || article.originalTitle}
-                            </h3>
+                            <div className="space-y-2 min-w-0 flex-grow">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[10px] bg-slate-900/60 text-blue-300 border border-slate-800 px-2 py-0.5 rounded font-mono font-semibold uppercase">
+                                  {article.source}
+                                </span>
+                                <span className="text-[10px] bg-slate-900/60 text-green-300 border border-slate-800/80 px-2 py-0.5 rounded font-mono font-semibold uppercase">
+                                  {article.category}
+                                </span>
+                                
+                                {article.status === "failed" && (
+                                  <span className="text-[10px] flex items-center gap-1 font-mono font-bold uppercase tracking-wider bg-rose-950/60 text-rose-300 border border-rose-900/50 px-2 py-0.5 rounded">
+                                    <AlertCircle className="h-3 w-3 text-rose-400" /> Publishing Failed
+                                  </span>
+                                )}
+                                {article.status === "approved" && (
+                                  <span className="text-[10px] flex items-center gap-1 font-mono font-bold uppercase tracking-wider bg-emerald-950/60 text-emerald-300 border border-emerald-900/50 px-2 py-0.5 rounded">
+                                    <Check className="h-3 w-3 text-emerald-400" /> Editorial Approved
+                                  </span>
+                                )}
+                                
+                                <span className="text-[10px] font-mono text-slate-450">
+                                  Sourced {new Date(article.scrapedAt).toLocaleTimeString()}
+                                </span>
+                              </div>
 
-                            {article.status === "failed" && article.publishError && (
-                              <p className="text-xs text-rose-350 bg-rose-950/40 p-2.5 rounded border border-rose-900/40 font-mono break-all">
-                                System Error: {article.publishError}
+                              <h3 className="text-base font-bold text-white tracking-tight leading-snug hover:text-[#008751] transition-colors font-display break-words">
+                                {article.title || article.originalTitle}
+                              </h3>
+
+                              {article.status === "failed" && article.publishError && (
+                                <p className="text-xs text-rose-350 bg-rose-950/40 p-2.5 rounded border border-rose-900/40 font-mono break-all">
+                                  System Error: {article.publishError}
+                                </p>
+                              )}
+
+                              <p className="text-slate-300 text-xs line-clamp-2 leading-relaxed">
+                                {article.summary || article.content ? decodeXml(article.content) : "No preview text returned."}
                               </p>
-                            )}
-
-                            <p className="text-slate-300 text-xs line-clamp-2 leading-relaxed">
-                              {article.summary || article.content ? decodeXml(article.content) : "No preview text returned."}
-                            </p>
+                            </div>
                           </div>
 
                           <div className="flex sm:flex-col items-center justify-end gap-2 shrink-0">
@@ -1144,72 +1241,125 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="space-y-4">
+                    {/* Bulk Actions Panel for WP Live Archive */}
+                    <div className="bg-[#162033] border border-slate-700/50 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-inner">
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2.5 text-xs font-mono font-medium text-slate-300 uppercase tracking-wider cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={publishedArchive.length > 0 && selectedArchiveIds.length === publishedArchive.length}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedArchiveIds(publishedArchive.map(a => a.id));
+                              } else {
+                                setSelectedArchiveIds([]);
+                              }
+                            }}
+                            className="w-4 h-4 rounded bg-[#0B0F1A] border-slate-700 text-[#008751] focus:ring-[#008751] cursor-pointer accent-[#008751]"
+                          />
+                          Select All Archive ({publishedArchive.length})
+                        </label>
+
+                        {selectedArchiveIds.length > 0 && (
+                          <span className="text-xs text-slate-400 font-mono">
+                            • {selectedArchiveIds.length} item(s) selected
+                          </span>
+                        )}
+                      </div>
+
+                      {selectedArchiveIds.length > 0 && (
+                        <button
+                          onClick={() => handleBulkDeleteArticles(selectedArchiveIds, 'archive')}
+                          className="flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 border border-rose-800/60 text-rose-350 text-xs font-bold rounded-xl transition-all cursor-pointer shadow-sm active:scale-95"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" /> Purge Selected Logs
+                        </button>
+                      )}
+                    </div>
+
                     {publishedArchive.map((article: Article) => (
                       <div key={article.id} className="bg-[#162033]/90 p-5 rounded-2xl border border-slate-700/50 hover:border-slate-600 transition-all flex flex-col md:flex-row md:items-center justify-between gap-4">
-                        <div className="space-y-1.5 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-[10px] bg-[#0B0F1A] font-mono text-slate-300 px-2 py-0.5 rounded font-bold uppercase border border-slate-850">{article.source}</span>
-                            <span className="text-[10px] bg-[#0B0F1A] font-mono text-green-300 px-2 py-0.5 rounded font-bold uppercase border border-[#008751]/30">{article.category}</span>
-                            <span className="text-xs text-slate-400 font-mono">WP ID: {article.wordpressId}</span>
+                        <div className="flex items-start gap-3 md:gap-4 flex-grow min-w-0">
+                          <div className="pt-1 select-none shrink-0">
+                            <input
+                              type="checkbox"
+                              checked={selectedArchiveIds.includes(article.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedArchiveIds(prev => [...prev, article.id]);
+                                } else {
+                                  setSelectedArchiveIds(prev => prev.filter(id => id !== article.id));
+                                }
+                              }}
+                              className="w-4 h-4 rounded bg-[#0B0F1A] border-slate-700 text-[#008751] focus:ring-[#008751] cursor-pointer accent-[#008751]"
+                            />
                           </div>
 
-                          <h3 className="text-base font-bold text-white tracking-tight leading-snug truncate font-display">
-                            {article.title}
-                          </h3>
+                          <div className="space-y-1.5 min-w-0 flex-grow">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] bg-[#0B0F1A] font-mono text-slate-300 px-2 py-0.5 rounded font-bold uppercase border border-slate-850">{article.source}</span>
+                              <span className="text-[10px] bg-[#0B0F1A] font-mono text-green-300 px-2 py-0.5 rounded font-bold uppercase border border-[#008751]/30">{article.category}</span>
+                              <span className="text-xs text-slate-400 font-mono">WP ID: {article.wordpressId}</span>
+                            </div>
 
-                          <p className="text-xs text-slate-350 italic line-clamp-1">
-                            {article.summary}
-                          </p>
+                            <h3 className="text-base font-bold text-white tracking-tight leading-snug truncate font-display">
+                              {article.title}
+                            </h3>
 
-                          <div className="flex items-center gap-4 text-xs text-slate-400 pt-1.5 font-mono flex-wrap">
-                            <span className="flex items-center gap-1.5">
-                              {article.whatsappError ? (
-                                <span className="flex items-center gap-1 text-rose-450" title={article.whatsappError}>
-                                  ⚠️ WhatsApp Fail
-                                </span>
-                              ) : (
-                                <span className="flex items-center gap-1 text-emerald-400">
-                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> WhatsApp Sent
+                            <p className="text-xs text-slate-350 italic line-clamp-1">
+                              {article.summary}
+                            </p>
+
+                            <div className="flex items-center gap-4 text-xs text-slate-400 pt-1.5 font-mono flex-wrap">
+                              <span className="flex items-center gap-1.5">
+                                {article.whatsappError ? (
+                                  <span className="flex items-center gap-1 text-rose-450" title={article.whatsappError}>
+                                    ⚠️ WhatsApp Fail
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1 text-emerald-400">
+                                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> WhatsApp Sent
+                                  </span>
+                                )}
+                              </span>
+                              
+                              {(config.telegramEnabled || article.telegramSent) && (
+                                <span className="flex items-center gap-1.5">
+                                  {article.telegramSent ? (
+                                    <span className="flex items-center gap-1 text-cyan-400">
+                                      <Send className="h-3.5 w-3.5 text-cyan-450" /> Telegram Sent
+                                    </span>
+                                  ) : article.telegramError ? (
+                                    <span className="flex items-center gap-1 text-rose-450" title={article.telegramError}>
+                                      ⚠️ Telegram Fail
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500">
+                                      ✈️ Telegram Pending
+                                    </span>
+                                  )}
                                 </span>
                               )}
-                            </span>
-                            
-                            {(config.telegramEnabled || article.telegramSent) && (
-                              <span className="flex items-center gap-1.5">
-                                {article.telegramSent ? (
-                                  <span className="flex items-center gap-1 text-cyan-400">
-                                    <Send className="h-3.5 w-3.5 text-cyan-450" /> Telegram Sent
-                                  </span>
-                                ) : article.telegramError ? (
-                                  <span className="flex items-center gap-1 text-rose-450" title={article.telegramError}>
-                                    ⚠️ Telegram Fail
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-500">
-                                    ✈️ Telegram Pending
-                                  </span>
-                                )}
-                              </span>
-                            )}
 
-                            {(config.facebookEnabled || article.facebookSent) && (
-                              <span className="flex items-center gap-1.5">
-                                {article.facebookSent ? (
-                                  <span className="flex items-center gap-1 text-indigo-400">
-                                    <Send className="h-3.5 w-3.5 text-indigo-400" /> Facebook Posted
-                                  </span>
-                                ) : article.facebookError ? (
-                                  <span className="flex items-center gap-1 text-rose-450" title={article.facebookError}>
-                                    ⚠️ Facebook Fail
-                                  </span>
-                                ) : (
-                                  <span className="text-slate-500">
-                                    👥 Facebook Pending
-                                  </span>
-                                )}
-                              </span>
-                            )}
-                            <span>Published {article.publishedAt ? new Date(article.publishedAt).toLocaleString() : ""}</span>
+                              {(config.facebookEnabled || article.facebookSent) && (
+                                <span className="flex items-center gap-1.5">
+                                  {article.facebookSent ? (
+                                    <span className="flex items-center gap-1 text-indigo-400">
+                                      <Send className="h-3.5 w-3.5 text-indigo-400" /> Facebook Posted
+                                    </span>
+                                  ) : article.facebookError ? (
+                                    <span className="flex items-center gap-1 text-rose-450" title={article.facebookError}>
+                                      ⚠️ Facebook Fail
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500">
+                                      👥 Facebook Pending
+                                    </span>
+                                  )}
+                                </span>
+                              )}
+                              <span>Published {article.publishedAt ? new Date(article.publishedAt).toLocaleString() : ""}</span>
+                            </div>
                           </div>
                         </div>
 
