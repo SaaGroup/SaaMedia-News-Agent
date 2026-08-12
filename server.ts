@@ -737,7 +737,8 @@ async function sendFacebookPagePost(
   title: string, 
   summary: string, 
   wpId: string, 
-  contentHtml?: string | null
+  contentHtml?: string | null,
+  featuredImage?: string | null
 ): Promise<boolean> {
   if (!config.facebookEnabled) {
     return false;
@@ -763,16 +764,62 @@ async function sendFacebookPagePost(
   // Construct message using requested format - no original source links, clean layout!
   const postMessage = `${cleanTitle}\n\n${cleanParagraph}\n\n📰 Read the full story here:\n${postUrl}`;
 
+  // Resolve featured image URL (explicit featuredImage or extract first <img> from contentHtml)
+  let imageUrl = featuredImage ? featuredImage.trim() : null;
+  if (!imageUrl && contentHtml) {
+    const imgMatch = contentHtml.match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (imgMatch && imgMatch[1]) {
+      imageUrl = imgMatch[1].trim();
+    }
+  }
+
+  // Prepend base URL if image path is relative
+  if (imageUrl && !imageUrl.startsWith("http://") && !imageUrl.startsWith("https://")) {
+    imageUrl = wpUrl.replace(/\/$/, "") + (imageUrl.startsWith("/") ? imageUrl : "/" + imageUrl);
+  }
+
   try {
     addLog("info", `Attempting to post news notification to Facebook Page ID: "${pageId}"...`, "system");
 
-    const url = `https://graph.facebook.com/v18.0/${pageId}/feed`;
+    // Primary Method: Post as a Photo to /{page_id}/photos so the image is directly attached and rendered as a preview on Facebook!
+    if (imageUrl) {
+      try {
+        addLog("info", `Dispatching Facebook Photo Post with image: ${imageUrl}`, "system");
+        const photoUrl = `https://graph.facebook.com/v18.0/${pageId}/photos`;
+        const photoParams = new URLSearchParams();
+        photoParams.append("url", imageUrl);
+        photoParams.append("caption", postMessage);
+        photoParams.append("access_token", token);
+
+        const photoResponse = await fetch(photoUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: photoParams
+        });
+
+        if (photoResponse.ok) {
+          addLog("success", `Successfully posted news photo & preview to Facebook Page: "${pageId}"`, "system");
+          return true;
+        }
+
+        const photoErrText = await photoResponse.text();
+        addLog("warn", `Facebook /photos endpoint returned status ${photoResponse.status} (${photoErrText}). Falling back to /feed endpoint...`, "system");
+      } catch (photoErr: any) {
+        addLog("warn", `Facebook photo dispatch error: ${photoErr.message}. Falling back to /feed endpoint...`, "system");
+      }
+    }
+
+    // Fallback Method: Post to /{page_id}/feed with link and optional picture parameter
+    const feedUrl = `https://graph.facebook.com/v18.0/${pageId}/feed`;
     const params = new URLSearchParams();
     params.append("message", postMessage);
-    params.append("link", postUrl); // Pass link parameter to automatically render a preview of the featured image and the SaaMedia post
+    params.append("link", postUrl);
+    if (imageUrl) {
+      params.append("picture", imageUrl);
+    }
     params.append("access_token", token);
 
-    const response = await fetch(url, {
+    const response = await fetch(feedUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: params
@@ -2190,7 +2237,7 @@ async function autoPublishFreshArticles() {
 
       try {
         if (config.facebookEnabled) {
-          const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId, article.content);
+          const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId, article.content, article.featuredImage);
           article.facebookSent = fbSuccess;
           article.facebookError = fbSuccess ? null : "Failed to send (check logs)";
         } else {
@@ -2623,7 +2670,7 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
 
     try {
       if (config.facebookEnabled) {
-        const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId, article.content);
+        const fbSuccess = await sendFacebookPagePost(config, article.title, article.summary, wpId, article.content, article.featuredImage);
         article.facebookSent = fbSuccess;
         article.facebookError = fbSuccess ? null : "Failed to send (check logs)";
       } else {
