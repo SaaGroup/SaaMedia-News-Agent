@@ -1088,16 +1088,66 @@ function countParagraphs(content: string): number {
     .length;
 }
 
-// Helper to clean scraped news content from DailyTrust or TVC News sources to avoid Google adverts, breadcrumbs, related news, and promotional text.
+// Helper to clean scraped news content from DailyTrust, TVC News, The Nation, Kogi Reports, etc. to avoid adverts, breadcrumbs, 404 junk, and promotional text.
 function cleanScrapedArticleText(rawText: string, sourceName: string): string {
   if (!rawText) return "";
 
-  // Split content by paragraphs or lines to filter them
-  const paragraphs = rawText.split(/\n\n+/);
-  const cleanedParagraphs: string[] = [];
-
   const lowerSource = (sourceName || "").toLowerCase();
+  const isTheNation = lowerSource.includes("nation") || rawText.includes("thenationonlineng.net");
+  const isKogiReports = lowerSource.includes("kogi") || rawText.includes("kogireports.com");
   const isDailyTrustOrTvc = lowerSource.includes("dailytrust") || lowerSource.includes("daily trust") || lowerSource.includes("tvc");
+
+  let processedText = rawText;
+
+  // 1. For "The Nation": Truncate as soon as "TAGS:" or "TAGS" block or promotional spam is reached
+  const tagsIdx = processedText.search(/\bTAGS\s*:/i);
+  if (tagsIdx !== -1) {
+    processedText = processedText.substring(0, tagsIdx).trim();
+  } else if (isTheNation) {
+    const tagsLineIdx = processedText.search(/\n\s*TAGS\s*\n/i);
+    if (tagsLineIdx !== -1) {
+      processedText = processedText.substring(0, tagsLineIdx).trim();
+    }
+  }
+
+  // The Nation promotional / CTA / Doctor & Job spam markers
+  const nationSpamMarkers = [
+    /Abuja doctor reveals a unique way/i,
+    /Congratulations, we just got you a job!/i,
+    /Follow The Nation Newspaper on WhatsApp/i,
+    /Join The Nation Channel/i,
+    /Subscribe to The Nation Newspaper Telegram channel/i,
+    /Join The Nation on Telegram/i,
+  ];
+
+  for (const marker of nationSpamMarkers) {
+    const mIdx = processedText.search(marker);
+    if (mIdx !== -1) {
+      processedText = processedText.substring(0, mIdx).trim();
+    }
+  }
+
+  // 2. For "Kogi Reports": Truncate at Previous Post, Next Post, Recent News, or Social Share blocks
+  if (isKogiReports) {
+    const kogiCutoffMarkers = [
+      /\bPrevious Post\b/i,
+      /\bNext Post\b/i,
+      /\bRecent News\b/i,
+      /\bSpread the love\b/i,
+      /FacebookTwitterGoogle\+Linkedin/i,
+      /Post Views:\s*\d+/i,
+    ];
+    for (const marker of kogiCutoffMarkers) {
+      const kIdx = processedText.search(marker);
+      if (kIdx !== -1) {
+        processedText = processedText.substring(0, kIdx).trim();
+      }
+    }
+  }
+
+  // Split content by paragraphs or lines to filter them
+  const paragraphs = processedText.split(/\n\n+/);
+  const cleanedParagraphs: string[] = [];
 
   for (let p of paragraphs) {
     p = p.trim();
@@ -1105,14 +1155,27 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
 
     const lowerP = p.toLowerCase();
 
-    // Global exclusions for any source (e.g. Header headings, leak script remnants, advert blocks)
+    // Global exclusions for any source
     if (isHeaderExcludedPhrase(p) || isScriptRemnant(p) || isAdvertOrUpdateNewsPattern(p)) {
       continue;
     }
 
+    // Kogi Reports author & metadata exclusions
+    if (isKogiReports) {
+      if (
+        /^\s*By\s+admin\b/i.test(p) ||
+        /^\s*By\s+[a-z0-9_\s]{2,30}$/i.test(p) ||
+        /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}/i.test(p) ||
+        lowerP.includes("spread the love") ||
+        lowerP.includes("facebooktwittergoogle+") ||
+        lowerP.includes("post views:")
+      ) {
+        continue;
+      }
+    }
+
     // If DailyTrust or TVC News, apply stricter filtering of target advert lines/blocks
     if (isDailyTrustOrTvc) {
-      // 1. Google Ads and tag managers JavaScript blocks / code snippets
       if (
         lowerP.includes("googletag") ||
         lowerP.includes("window.googletag") ||
@@ -1127,7 +1190,6 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
         continue;
       }
 
-      // 2. Specific premium domain brokerage ads
       if (
         lowerP.includes("invest ₦2.5 million") ||
         lowerP.includes("premium domains") ||
@@ -1139,7 +1201,6 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
         continue;
       }
 
-      // 3. WhatsApp Community prompt
       if (
         lowerP.includes("daily trust whatsapp community") ||
         lowerP.includes("join daily trust whatsapp") ||
@@ -1148,18 +1209,16 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
         continue;
       }
 
-      // 4. Exclude author name and dates of published article/news for DailyTrust/TVC Sources
       if (isAuthorPattern(p) || isDatePattern(p)) {
         continue;
       }
 
-      // 5. Exclude words/phrases like ADVERT, UPDATE NEWS
       if (isAdvertOrUpdateNewsPattern(p)) {
         continue;
       }
     }
 
-    // 6. Source breadcrumbs (e.g., Home > Topics > News, Home » Politics, etc., and Uncategorized / Uncategproze)
+    // Source breadcrumbs
     const isBreadcrumb =
       /^\s*home\s*[>»/|]/i.test(p) ||
       (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
@@ -1173,7 +1232,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       continue;
     }
 
-    // 7. Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
+    // Exclude exact/starts-with lines of ADVERTISEMENT, ALSO READ, READ MORE, Sponsor Ads, Advert delimiters
     if (
       lowerP === "advertisement" ||
       lowerP === "also read" ||
@@ -1187,7 +1246,7 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       continue;
     }
 
-    // 8. Exclude Inline Related Posts or News/Articles link blocks
+    // Exclude Inline Related Posts or News/Articles link blocks
     if (
       lowerP.startsWith("also read") ||
       lowerP.startsWith("read also") ||
@@ -1214,9 +1273,19 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
       const lowerLine = line.toLowerCase();
       if (!line) continue;
 
-      // Global line exclusions for any source
       if (isHeaderExcludedPhrase(line) || isScriptRemnant(line) || isAdvertOrUpdateNewsPattern(line)) {
         continue;
+      }
+
+      if (isKogiReports) {
+        if (
+          /^\s*By\s+admin\b/i.test(line) ||
+          lowerLine.includes("spread the love") ||
+          lowerLine.includes("facebooktwittergoogle+") ||
+          lowerLine.includes("post views:")
+        ) {
+          continue;
+        }
       }
 
       if (isDailyTrustOrTvc) {
@@ -1303,12 +1372,29 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       signal: AbortSignal.timeout(10000) // 10 seconds timeout
     });
 
-    if (!response.ok) {
-      addLog("warn", `Webpage crawler returned HTTP status ${response.status} for URL`, "scraper");
-      return { fullText: "", featuredImage: null, imageUrls: [] };
+    if (!response.ok || response.status === 404) {
+      addLog("warn", `Webpage crawler returned HTTP status ${response.status} for ${url} (Skipping 404 / broken link)`, "scraper");
+      return { fullText: "HTTP_404_ERROR", featuredImage: null, imageUrls: [] };
     }
 
     const html = await response.text();
+    const lowerHtml = html.toLowerCase();
+
+    // Check for 404 Error page markers in body/title
+    if (
+      lowerHtml.includes("<title>404") ||
+      lowerHtml.includes("404 - not found") ||
+      lowerHtml.includes("404 page not found") ||
+      lowerHtml.includes("page not found") ||
+      lowerHtml.includes("error 404") ||
+      lowerHtml.includes("404 error") ||
+      lowerHtml.includes("article not found") ||
+      lowerHtml.includes("the page you are looking for does not exist")
+    ) {
+      addLog("warn", `Detected 404 / Page Not Found content in HTML for ${url}`, "scraper");
+      return { fullText: "HTTP_404_ERROR", featuredImage: null, imageUrls: [] };
+    }
+
     const imageUrls: string[] = [];
     let featuredImage: string | null = null;
 
@@ -1358,14 +1444,14 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       }
     }
 
-    // Clean body HTML and get clean text
+    // Clean body HTML and extract full text across Nigerian news portals
     let bodyHtml = html;
     const bodyStart = html.indexOf("<body");
     if (bodyStart !== -1) {
       bodyHtml = html.substring(bodyStart);
     }
 
-    bodyHtml = bodyHtml
+    let cleanHtml = bodyHtml
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<style[\s\S]*?<\/style>/gi, "")
       .replace(/<nav[\s\S]*?<\/nav>/gi, "")
@@ -1373,39 +1459,78 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       .replace(/<footer[\s\S]*?<\/footer>/gi, "")
       .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
-      .replace(/<aside[\s\S]*?<\/aside>/gi, "");
+      .replace(/<aside[\s\S]*?<\/aside>/gi, "")
+      .replace(/<form[\s\S]*?<\/form>/gi, "")
+      .replace(/<div\s+[^>]*class=["'][^"']*(?:sidebar|related|comments|share|tags|author|post-views|recent-posts)[^"']*["'][\s\S]*?<\/div>/gi, "");
 
-    // Try to isolate main text block matching articles
-    let articleHtml = "";
-    const articleMatch = bodyHtml.match(/<article[\s\S]*?<\/article>/i);
-    if (articleMatch) {
-      articleHtml = articleMatch[0];
+    // Try to isolate main text block matching articles across Channelstv, TVC, Arise, PremiumTimes, KogiReports, TheNation, TheCable, Saharareporters, Eagleonline
+    let articleContentHtml = "";
+    const articleTagMatch = cleanHtml.match(/<article[\s\S]*?<\/article>/i);
+    if (articleTagMatch) {
+      articleContentHtml = articleTagMatch[0];
     } else {
-      const divMatch = bodyHtml.match(/<div\s+[^>]*class=["'][^"']*(?:entry-content|post-content|article-content|story-body|main-content)[^"']*["'][\s\S]*?<\/div>/i);
-      if (divMatch) {
-        articleHtml = divMatch[0];
+      const containerRegex = /<div\s+[^>]*class=["'][^"']*(?:entry-content|td-post-content|post-content|article-content|story-body|field-name-body|main-content|page-content|story-content)[^"']*["'][\s\S]*$/i;
+      const match = cleanHtml.match(containerRegex);
+      if (match) {
+        articleContentHtml = match[0];
       }
     }
 
-    const targetHtml = articleHtml || bodyHtml;
-    let cleanText = targetHtml
-      .replace(/<\/p>/gi, "\n\n")
-      .replace(/<p[^>]*>/gi, "\n\n")
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<[^>]*>/g, " ")
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/[ \t]+/g, " ")
-      .split(/\n+/)
-      .map(line => line.trim())
-      .filter(line => line.length > 0)
-      .join("\n\n")
-      .trim();
+    const targetHtml = articleContentHtml || cleanHtml;
 
-    // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, etc.
+    // Extract all <p> paragraphs for complete narrative extraction
+    const pRegex = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
+    const extractedParagraphs: string[] = [];
+    let pMatch;
+
+    while ((pMatch = pRegex.exec(targetHtml)) !== null) {
+      let pText = pMatch[1]
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#8217;/gi, "'")
+        .replace(/&#8220;/gi, '"')
+        .replace(/&#8221;/gi, '"')
+        .replace(/&#8211;/gi, "-")
+        .replace(/&#8212;/gi, "—")
+        .replace(/&rsquo;/gi, "'")
+        .replace(/&lsquo;/gi, "'")
+        .replace(/&rdquo;/gi, '"')
+        .replace(/&ldquo;/gi, '"')
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (pText.length > 12) {
+        extractedParagraphs.push(pText);
+      }
+    }
+
+    let cleanText = "";
+    if (extractedParagraphs.length > 0) {
+      cleanText = extractedParagraphs.join("\n\n");
+    } else {
+      cleanText = targetHtml
+        .replace(/<\/p>/gi, "\n\n")
+        .replace(/<p[^>]*>/gi, "\n\n")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/[ \t]+/g, " ")
+        .split(/\n+/)
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .join("\n\n")
+        .trim();
+    }
+
+    // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, or 404 fragments
     cleanText = cleanScrapedArticleText(cleanText, sourceName);
 
     addLog("success", `Crawled original webpage successfully. Extracted ${cleanText.length} characters, featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
@@ -1445,6 +1570,9 @@ async function runAIElegancyAgent(
     // Fetch full webpage context first
     if (articleUrl && sourceName) {
       const crawl = await fetchFullPageAndImages(articleUrl, sourceName);
+      if (crawl.fullText === "HTTP_404_ERROR") {
+        throw new Error("ARTICLE_404_NOT_FOUND");
+      }
       if (crawl.fullText) {
         textToAnalyze = crawl.fullText;
       }
@@ -1858,10 +1986,18 @@ async function scrapeAndAutoProcess() {
           isEnriched = true;
           addLog("success", `AI successfully created full-length article preserving original details: "${finalTitle}"`, "scraper");
         } catch (err: any) {
+          if (err.message === "ARTICLE_404_NOT_FOUND") {
+            addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
+            continue;
+          }
           addLog("warn", `Could not auto-enrich with AI: ${err.message}. Fetching full page and saving raw full content instead.`, "scraper");
           // Fallback to directly crawling full webpage content as raw draft
           try {
             const crawl = await fetchFullPageAndImages(item.link, source.name);
+            if (crawl.fullText === "HTTP_404_ERROR") {
+              addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
+              continue;
+            }
             if (crawl.fullText) {
               let paragraphs = crawl.fullText.split("\n\n").map(p => p.trim()).filter(Boolean);
               if (paragraphs.length <= 1) {
@@ -2234,6 +2370,26 @@ app.post("/api/sources", (req, res) => {
   db.sources = req.body;
   saveDb(db);
   addLog("success", `Active news sources list synchronized.`, "system");
+  res.json({ status: "ok", sources: db.sources });
+});
+
+app.delete("/api/sources/:id", (req, res) => {
+  const db = loadDb();
+  const id = req.params.id;
+  db.sources = db.sources.filter((s: any) => s.id !== id);
+  saveDb(db);
+  addLog("success", `Source outlet ${id} removed from monitoring list.`, "system");
+  res.json({ status: "ok", sources: db.sources });
+});
+
+app.post("/api/sources/bulk-delete", (req, res) => {
+  const db = loadDb();
+  const { ids } = req.body;
+  if (Array.isArray(ids)) {
+    db.sources = db.sources.filter((s: any) => !ids.includes(s.id));
+    saveDb(db);
+    addLog("success", `Bulk purged ${ids.length} source outlets from active monitoring.`, "system");
+  }
   res.json({ status: "ok", sources: db.sources });
 });
 

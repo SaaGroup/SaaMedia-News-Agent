@@ -126,6 +126,7 @@ export default function App() {
   // Checkbox Selection States for Bulk Actions
   const [selectedQueueIds, setSelectedQueueIds] = useState<string[]>([]);
   const [selectedArchiveIds, setSelectedArchiveIds] = useState<string[]>([]);
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
 
   // Manual News Submission State
   const [manualTitle, setManualTitle] = useState("");
@@ -561,9 +562,54 @@ export default function App() {
     return () => clearInterval(interval);
   }, [config.whatsappGateway]);
 
+  // Delete single source
+  const handleDeleteSource = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to remove "${name}" from monitored publications?`)) return;
+    try {
+      const res = await fetch(`/api/sources/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        triggerAlert("success", `Removed "${name}" from monitored outlets.`);
+        setSelectedSourceIds(prev => prev.filter(sId => sId !== id));
+        fetchData();
+      } else {
+        triggerAlert("error", "Failed to delete publication source.");
+      }
+    } catch (e) {
+      triggerAlert("error", "Network error while deleting publication source.");
+    }
+  };
+
+  // Bulk delete sources
+  const handleBulkDeleteSources = async () => {
+    if (selectedSourceIds.length === 0) return;
+    if (!confirm(`Are you sure you want to delete ${selectedSourceIds.length} selected publication sources?`)) return;
+    try {
+      const res = await fetch("/api/sources/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedSourceIds })
+      });
+      if (res.ok) {
+        triggerAlert("success", `Successfully purged ${selectedSourceIds.length} publication sources.`);
+        setSelectedSourceIds([]);
+        fetchData();
+      } else {
+        triggerAlert("error", "Failed to bulk delete selected publication sources.");
+      }
+    } catch (e) {
+      triggerAlert("error", "Error connecting to backend during bulk source deletion.");
+    }
+  };
+
   // Filter queues
   const reviewQueue = articles.filter(a => a.status === "scraped" || a.status === "approved" || a.status === "failed" || a.status === "publishing");
-  const publishedArchive = articles.filter(a => a.status === "published");
+  const publishedArchive = articles
+    .filter(a => a.status === "published")
+    .sort((a, b) => {
+      const timeA = a.publishedAt ? new Date(a.publishedAt).getTime() : (a.scrapedAt ? new Date(a.scrapedAt).getTime() : 0);
+      const timeB = b.publishedAt ? new Date(b.publishedAt).getTime() : (b.scrapedAt ? new Date(b.scrapedAt).getTime() : 0);
+      return timeB - timeA;
+    });
   const successRate = stats.totalScraped > 0 ? Math.round((stats.totalPublished / stats.totalScraped) * 100) : 0;
 
   return (
@@ -1455,54 +1501,118 @@ export default function App() {
                   </form>
                 </div>
 
-                {/* ACTIVE SOURCES LIST */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {sources.map((source: NewsSource) => {
-                    const count = articles.filter(a => a.source === source.name).length;
-                    return (
-                      <div key={source.id} className="bg-[#162033]/95 p-5 rounded-2xl border border-slate-700/50 shadow-sm flex items-start justify-between gap-4">
-                        <div className="space-y-1.5 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] bg-[#0B0F1A] font-mono text-green-300 border border-[#008751]/20 px-2 py-0.5 rounded font-bold uppercase">{source.type}</span>
-                            <span className="text-xs text-slate-400 font-mono">Harvested: {count} articles</span>
-                          </div>
-                          
-                          <h4 className="text-base font-bold text-white tracking-tight truncate font-display">{source.name}</h4>
-                          <p className="text-xs text-green-400 truncate max-w-[200px]" title={source.feedUrl}>
-                            {source.feedUrl}
-                          </p>
-                          
-                          {source.lastScrapedAt ? (
-                            <span className="text-[10px] text-slate-455 block font-mono">
-                              Last scrape: {new Date(source.lastScrapedAt).toLocaleTimeString()}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-slate-455 italic block font-mono">Never triggered</span>
-                          )}
-                        </div>
+                {/* ACTIVE SOURCES LIST HEADER WITH BULK ACTIONS */}
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 bg-[#162033]/90 p-4 rounded-xl border border-slate-700/60">
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-300 hover:text-white transition-colors">
+                        <input
+                          type="checkbox"
+                          checked={sources.length > 0 && selectedSourceIds.length === sources.length}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedSourceIds(sources.map(s => s.id));
+                            } else {
+                              setSelectedSourceIds([]);
+                            }
+                          }}
+                          className="w-4 h-4 rounded border-slate-700 text-[#008751] focus:ring-[#008751] bg-[#0B0F1A]"
+                        />
+                        <span>Select All Outlets ({sources.length})</span>
+                      </label>
+                      {selectedSourceIds.length > 0 && (
+                        <span className="text-xs font-mono text-emerald-400 font-semibold bg-emerald-950/60 px-2.5 py-1 rounded-full border border-emerald-800/40">
+                          {selectedSourceIds.length} selected
+                        </span>
+                      )}
+                    </div>
 
-                        <div className="flex flex-col items-end gap-2 shrink-0">
-                          {/* TOGGLE SWITCH */}
-                          <button
-                            onClick={() => handleToggleSource(source.id)}
-                            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                              source.enabled ? "bg-[#008751]" : "bg-slate-800"
-                            }`}
-                          >
-                            <span
-                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                source.enabled ? "translate-x-4" : "translate-x-0"
-                              }`}
+                    {selectedSourceIds.length > 0 && (
+                      <button
+                        onClick={handleBulkDeleteSources}
+                        className="flex items-center gap-2 bg-red-600/90 hover:bg-red-500 text-white px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-sm cursor-pointer"
+                      >
+                        <Trash2 size={14} />
+                        <span>Delete Selected Outlets ({selectedSourceIds.length})</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {sources.map((source: NewsSource) => {
+                      const count = articles.filter(a => a.source === source.name).length;
+                      const isSelected = selectedSourceIds.includes(source.id);
+                      return (
+                        <div key={source.id} className={`bg-[#162033]/95 p-5 rounded-2xl border transition-all shadow-sm flex items-start justify-between gap-4 ${isSelected ? "border-emerald-500/80 bg-emerald-950/20" : "border-slate-700/50"}`}>
+                          <div className="flex items-start gap-3 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedSourceIds(prev => [...prev, source.id]);
+                                } else {
+                                  setSelectedSourceIds(prev => prev.filter(sId => sId !== source.id));
+                                }
+                              }}
+                              className="mt-1 w-4 h-4 rounded border-slate-700 text-[#008751] focus:ring-[#008751] bg-[#0B0F1A] shrink-0 cursor-pointer"
                             />
-                          </button>
-                          
-                          <span className={`text-[10px] font-mono font-semibold ${source.enabled ? "text-green-400" : "text-slate-400"}`}>
-                            {source.enabled ? "ENABLED" : "PAUSED"}
-                          </span>
+
+                            <div className="space-y-1.5 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] bg-[#0B0F1A] font-mono text-green-300 border border-[#008751]/20 px-2 py-0.5 rounded font-bold uppercase">{source.type}</span>
+                                <span className="text-xs text-slate-400 font-mono">Harvested: {count} articles</span>
+                              </div>
+                              
+                              <h4 className="text-base font-bold text-white tracking-tight truncate font-display">{source.name}</h4>
+                              <p className="text-xs text-green-400 truncate max-w-[200px]" title={source.feedUrl}>
+                                {source.feedUrl}
+                              </p>
+                              
+                              {source.lastScrapedAt ? (
+                                <span className="text-[10px] text-slate-455 block font-mono">
+                                  Last scrape: {new Date(source.lastScrapedAt).toLocaleTimeString()}
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-455 italic block font-mono">Never triggered</span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col items-end gap-3 shrink-0">
+                            {/* TOGGLE SWITCH */}
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => handleToggleSource(source.id)}
+                                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                  source.enabled ? "bg-[#008751]" : "bg-slate-800"
+                                }`}
+                              >
+                                <span
+                                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                    source.enabled ? "translate-x-4" : "translate-x-0"
+                                  }`}
+                                />
+                              </button>
+                              <span className={`text-[10px] font-mono font-semibold ${source.enabled ? "text-green-400" : "text-slate-400"}`}>
+                                {source.enabled ? "ENABLED" : "PAUSED"}
+                              </span>
+                            </div>
+
+                            {/* DELETE BUTTON */}
+                            <button
+                              onClick={() => handleDeleteSource(source.id, source.name)}
+                              title="Delete source outlet"
+                              className="flex items-center gap-1 text-slate-400 hover:text-red-400 hover:bg-red-500/10 p-1.5 rounded-lg transition-colors border border-transparent hover:border-red-500/20 text-xs font-semibold cursor-pointer"
+                            >
+                              <Trash2 size={14} />
+                              <span>Delete</span>
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
                 </div>
 
               </div>
