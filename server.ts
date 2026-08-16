@@ -1733,7 +1733,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       finalContentHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
 <p>
- News Credit to our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
+ Credit to our Media Partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
 </p>`;
     }
 
@@ -1766,7 +1766,7 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
       fallbackHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
 <p>
- News Credit to our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
+ Credit to our Media Partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
 </p>`;
     }
 
@@ -2062,7 +2062,7 @@ async function scrapeAndAutoProcess() {
                 draftHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
 <p>
- News Credit to our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+ Credit to our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
 </p>`;
               }
               finalContent = draftHtml;
@@ -2093,7 +2093,7 @@ async function scrapeAndAutoProcess() {
               draftHtml += `
 <hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
 <p>
- News Credit to our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
+ Credit to our Media Partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
 </p>`;
             }
             finalContent = draftHtml;
