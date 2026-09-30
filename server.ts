@@ -982,6 +982,30 @@ function decodeXml(str: string): string {
     .trim();
 }
 
+// Helper to clean scraped titles by removing breadcrumbs and hashtag words (e.g. #HotTopics, #BAT100Days, #Beyond100Days) before/in the title
+function cleanScrapedTitle(rawTitle: string): string {
+  if (!rawTitle) return "";
+  let cleaned = decodeAndCleanHtml(decodeXml(rawTitle));
+
+  // 1. Remove any hashtag tokens like #HotTopics, #BAT100Days, #Beyond100Days, etc.
+  cleaned = cleaned.replace(/#[a-zA-Z0-9_-]+[,\s|•·›»>\/-]*/g, " ");
+
+  // 2. Remove breadcrumb prefixes before the title (e.g., "Home > Politics > ", "Home » Nigeria News » ", "You are here: Home / ...")
+  cleaned = cleaned
+    .replace(/^\s*(?:you\s+are\s+here\s*:\s*)?home\s*(?:[>»/|›•·→-]+\s*[^:>»/|›•·→]{1,40}\s*)+[>»/|›•·→-]*\s*/i, "")
+    .replace(/^\s*(?:home|news|tvc\s*news|nigeria\s*news|politics|business|sports|entertainment|world|africa|national|top\s*news|breaking\s*news|latest\s*news|trending|uncategorized)\s*(?:[>»/|›•·→]+\s*[a-zA-Z0-9\s&-]{1,35}\s*)+[>»/|›•·→]*\s*/i, "")
+    .replace(/^\s*home\s+(?:news|politics|business|sports|entertainment|national|nigeria\s+news|top\s+news)\s+/i, "");
+
+  // 3. Remove leading category/header badge phrases if stuck before the title
+  cleaned = cleaned
+    .replace(/^\s*(?:top\s+news|latest\s+nigeria\s+news|entertainment\s+latest\s+nigeria\s+news|sports\s+top\s+news|health\s+top\s+news|politics\s+top\s+news|update\s+news|news\s+update)\s*[:|»>›•·-]?\s*/i, "")
+    .replace(/^[\s|•·›»>\/:-]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned;
+}
+
 // Regex RSS Feed Parser (Zero Native Binary dependencies)
 function parseRssXml(xmlText: string): Array<{ title: string; link: string; description: string; pubDate: string }> {
   const items: any[] = [];
@@ -1000,7 +1024,7 @@ function parseRssXml(xmlText: string): Array<{ title: string; link: string; desc
       const rawUrl = linkMatch[1].trim();
       // clean url
       const url = rawUrl.replace(/<!\[CDATA\[|\]\]>/g, "").trim();
-      const title = titleMatch ? decodeXml(titleMatch[1]) : "Nigerian News Headline";
+      const title = titleMatch ? (cleanScrapedTitle(titleMatch[1]) || "Nigerian News Headline") : "Nigerian News Headline";
       const rawEncoded = contentEncodedMatch && contentEncodedMatch[1]
         ? contentEncodedMatch[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim()
         : "";
@@ -1524,14 +1548,27 @@ function shouldExcludeBlockText(plainText: string, sourceName: string): boolean 
     }
   }
 
-  // Breadcrumbs & related links
+  // Breadcrumbs & hashtag lines
   const isBreadcrumb =
-    /^\s*home\s*[>»/|]/i.test(p) ||
-    (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
+    /^\s*(?:you\s+are\s+here\s*:\s*)?home\s*[>»/|›•·→]/i.test(p) ||
+    (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | ") || lowerP.includes(" › "))) ||
     /^\s*home\s+topics\s+/i.test(p) ||
     /^\s*home\s+news\s+/i.test(p) ||
-    /^\s*(uncategorized|uncategproze)\b/i.test(p);
+    /^\s*home\s+nigeria\s+news/i.test(p) ||
+    /^\s*home\s+politics/i.test(p) ||
+    /^\s*home\s+business/i.test(p) ||
+    /^\s*(uncategorized|uncategproze)\b/i.test(p) ||
+    (p.length < 140 && (p.match(/\s*[>»›]\s*/g) || []).length >= 2);
   if (isBreadcrumb) return true;
+
+  // Exclude hashtag blocks (e.g., #HotTopics, #BAT100Days, #Beyond100Days, or any line made of hashtags/category tags)
+  const hasKnownTvcHashtags = /#(?:hottopics|bat100days|beyond100days)\b/i.test(p);
+  const wordsWithoutPunct = p.replace(/[,|•·›»>\/:-]/g, " ").trim().split(/\s+/).filter(Boolean);
+  const isAllHashtags = wordsWithoutPunct.length > 0 && wordsWithoutPunct.every(w => w.startsWith("#"));
+  const isShortHashtagLine = p.length < 120 && /#[a-zA-Z0-9_-]{2,}/.test(p) && wordsWithoutPunct.filter(w => w.startsWith("#")).length >= 1 && wordsWithoutPunct.length <= 8;
+  if (hasKnownTvcHashtags || isAllHashtags || isShortHashtagLine) {
+    return true;
+  }
 
   if (
     lowerP === "advertisement" ||
@@ -1637,14 +1674,22 @@ function extractStructuredArticleBlocks(
       } else if (tag === "h2" || tag === "h3" || tag === "h4") {
         if (plainText.length < 3) continue;
         const outHeadingTag = tag === "h2" ? "h3" : tag;
-        const sanitizedHeading = sanitizeInlineHtml(innerRaw, baseUrl);
-        if (sanitizedHeading) {
+        let sanitizedHeading = sanitizeInlineHtml(innerRaw, baseUrl);
+        // Strip any leading hashtags or breadcrumbs inside headings
+        sanitizedHeading = sanitizedHeading
+          .replace(/^(?:<[^>]+>)*\s*(?:#[a-zA-Z0-9_-]+[\s,|•·-]*)+/gi, "")
+          .trim();
+        if (sanitizedHeading && decodeAndCleanHtml(sanitizedHeading).length >= 3) {
           blocks.push(`<${outHeadingTag}>${sanitizedHeading}</${outHeadingTag}>`);
         }
       } else if (tag === "p") {
         if (plainText.length < 12) continue;
-        const sanitizedP = sanitizeInlineHtml(innerRaw, baseUrl);
-        if (sanitizedP) {
+        let sanitizedP = sanitizeInlineHtml(innerRaw, baseUrl);
+        // Strip any leading hashtags (e.g. #HotTopics #BAT100Days #Beyond100Days) prepended to a paragraph
+        sanitizedP = sanitizedP
+          .replace(/^(?:<[^>]+>)*\s*(?:#[a-zA-Z0-9_-]+[\s,|•·-]*)+/gi, "")
+          .trim();
+        if (sanitizedP && decodeAndCleanHtml(sanitizedP).length >= 12) {
           blocks.push(`<p>${sanitizedP}</p>`);
         }
       }
@@ -1658,15 +1703,16 @@ function extractStructuredArticleBlocks(
     if (rawParagraphs.length <= 1) {
       rawParagraphs = cleanedPlain.split(/\n+/).map(p => p.trim()).filter(Boolean);
     }
-    for (const p of rawParagraphs) {
+    for (const rawP of rawParagraphs) {
+      const p = rawP.replace(/^(?:#[a-zA-Z0-9_-]+[\s,|•·-]*)+/gi, "").trim();
       if (p.length >= 12 && !shouldExcludeBlockText(p, sourceName)) {
         blocks.push(`<p>${p}</p>`);
       }
     }
   }
 
-  // Strip leading junk blocks (e.g. duplicate title, "Top News", "Breaking News", hashtags, or tiny <25 char opener)
-  const cleanTitleNorm = (articleTitle || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Strip leading junk blocks (e.g. duplicate title, breadcrumbs, "Top News", "Breaking News", hashtags like #HotTopics/#BAT100Days/#Beyond100Days, or tiny <25 char opener)
+  const cleanTitleNorm = cleanScrapedTitle(articleTitle || "").toLowerCase().replace(/[^a-z0-9]/g, "");
   while (blocks.length > 1) {
     const firstBlock = blocks[0];
     const firstPlain = decodeAndCleanHtml(firstBlock).trim();
@@ -1681,12 +1727,14 @@ function extractStructuredArticleBlocks(
       firstLower.includes("top news") ||
       firstLower.includes("breaking news") ||
       firstLower.includes("uncategorized") ||
-      firstLower.includes("uncategproze");
-    const isHashtagsOnly =
-      firstPlain.includes("#") && firstPlain.split(/\s+/).every(w => w.startsWith("#") || w.trim() === "");
+      firstLower.includes("uncategproze") ||
+      shouldExcludeBlockText(firstPlain, sourceName);
+    const isHashtagBlock =
+      /#[a-zA-Z0-9_-]+/.test(firstPlain) &&
+      (firstPlain.length < 150 || firstPlain.replace(/[,|•·›»>\/:-]/g, " ").trim().split(/\s+/).every(w => w.startsWith("#")));
     const isTinyParagraph = /^<p\b/i.test(firstBlock) && firstPlain.length < 25;
 
-    if (isTitleDup || isJunkHeader || isHashtagsOnly || isTinyParagraph) {
+    if (isTitleDup || isJunkHeader || isHashtagBlock || isTinyParagraph) {
       blocks.shift();
     } else {
       break;
@@ -1818,7 +1866,7 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
       .replace(/<aside[\s\S]*?<\/aside>/gi, "")
       .replace(/<form[\s\S]*?<\/form>/gi, "")
-      .replace(/<div\s+[^>]*class=["'][^"']*(?:sidebar|related|comments|share|sharedaddy|jp-relatedposts|tags|post-tags|author|post-views|recent-posts|post-navigation)[^"']*["'][\s\S]*?<\/div>/gi, "");
+      .replace(/<(?:div|p|ul|ol|span|section)\s+[^>]*class=["'][^"']*(?:breadcrumb|breadcrumbs|yoast-breadcrumb|rank-math-breadcrumb|entry-crumbs|td-crumb-container|hashtag|hashtags|sidebar|related|comments|share|sharedaddy|jp-relatedposts|tags|post-tags|entry-tags|tags-links|author|post-views|recent-posts|post-navigation)[^"']*["'][\s\S]*?<\/(?:div|p|ul|ol|span|section)>/gi, "");
 
     // Try to isolate main text block matching articles across Nigerian portals (picking the richest <article> or content container)
     let articleContentHtml = "";
@@ -1835,7 +1883,16 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       }
     }
 
-    const targetHtml = articleContentHtml || cleanHtml;
+    let targetHtml = articleContentHtml || cleanHtml;
+
+    // Strip everything that appears BEFORE the main article <h1> title (such as top breadcrumbs and hashtags like #HotTopics, #BAT100Days, #Beyond100Days)
+    const h1Match = targetHtml.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i);
+    if (h1Match && h1Match.index !== undefined) {
+      const afterH1 = targetHtml.substring(h1Match.index + h1Match[0].length);
+      if ((afterH1.match(/<p\b/gi) || []).length >= 1) {
+        targetHtml = afterH1;
+      }
+    }
 
     // Extract structured blocks (<p>, <h3>, <h4>, <blockquote>, <ul>, <ol>) preserving inline bold/italic/links
     let structuredBlocks = extractStructuredArticleBlocks(targetHtml, sourceName, url);
@@ -1870,13 +1927,13 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
   }
 }
 
-// Helper to build the "What You Should Know" section and Media Partner Credit footer
+// Helper to build the "What You Should Know" section (without Media Partner Credit footer)
 function appendEditorialSections(
   firstParagraphHtml: string,
   remainingBlocks: string[],
   whatYouShouldKnowBodyHtml: string,
-  articleUrl?: string,
-  sourceName?: string
+  _articleUrl?: string,
+  _sourceName?: string
 ): string {
   const parts: string[] = [];
 
@@ -1901,13 +1958,6 @@ function appendEditorialSections(
 
   parts.push(`<h3>What You Should Know</h3>\n${laymanContent}`);
 
-  // Append Media Partner Credit at the very end
-  if (articleUrl && sourceName) {
-    parts.push(
-      `<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />\n<p>\n Credit to our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName}</a>.\n</p>`
-    );
-  }
-
   return parts.join("\n\n");
 }
 
@@ -1928,6 +1978,7 @@ async function runAIElegancyAgent(
   contentHtml: string;
   featuredImage: string | null;
 }> {
+  originalTitle = cleanScrapedTitle(originalTitle) || originalTitle;
   let textToAnalyze = originalSnippet || "";
   let imagesFound: string[] = [];
   let crawlerFeaturedImage: string | null = null;
@@ -1983,11 +2034,12 @@ MEDIA ASSETS:
 ${inputImagesText}
 
 STRICT EDITORIAL SPECIFICATIONS:
-1. Write a Captivating, SEO-Optimized Title (polished, professional, accurate).
+1. Write a Captivating, SEO-Optimized Title (polished, professional, accurate). Do NOT include any hashtags (such as #HotTopics, #BAT100Days, #Beyond100Days) or breadcrumbs in the title.
 2. Write a Professional Short Summary (1-2 sentences) of the core development for social alerts.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
 4. Paraphrase ONLY the First Paragraph ("paraphrasedFirstParagraph"):
    - Refine and paraphrase ONLY the isolated first paragraph above while strictly preserving its core message, announcement, names, dates, locations, and key facts.
+   - Do NOT include any breadcrumbs or hashtag words (like #HotTopics, #BAT100Days, #Beyond100Days) at the start of the paragraph.
    - Return ONLY the paraphrased first paragraph text (you may use <strong> or <em> if appropriate, without outer <p> tags). Do NOT rewrite or include the rest of the article here, because all subsequent paragraphs, subheadings, blockquotes, lists, and links from the source are automatically preserved verbatim.
 5. Write the "What You Should Know" Layman Section ("whatYouShouldKnowHtml"):
    - Simplify and summarize the entire story in accessible, everyday layman terms.
@@ -2081,7 +2133,7 @@ Respond strictly in valid JSON format matching this schema:
     );
 
     return {
-      title: parsed.title || originalTitle,
+      title: cleanScrapedTitle(parsed.title || originalTitle) || originalTitle,
       summary: parsed.summary || firstParagraphPlain.substring(0, 160),
       category: parsed.category || "National",
       contentHtml: finalContentHtml,
@@ -2251,10 +2303,14 @@ async function scrapeAndAutoProcess() {
             const href = linkMatch[1].trim();
             const innerHtml = linkMatch[2];
             
-            // Skip non-article URLs (e.g. author pages, category grids, tags, feed links, graphics/assets)
+            // Skip non-article URLs (e.g. author pages, category grids, tags, hashtags, topics, feed links, graphics/assets)
             if (!href.startsWith("http") || 
                 href.includes("/category/") || 
                 href.includes("/tag/") || 
+                href.includes("/tags/") || 
+                href.includes("/hashtag/") || 
+                href.includes("/topic/") || 
+                href.includes("/topics/") || 
                 href.includes("/author/") || 
                 href.endsWith(".png") || 
                 href.endsWith(".jpg") || 
@@ -2270,9 +2326,15 @@ async function scrapeAndAutoProcess() {
             if (pathSegments.length < 3) {
               continue; // Too short to be a valid news article post url
             }
+
+            // If the anchor wraps a heading tag, prefer the heading text over surrounding hashtag/breadcrumb badges
+            const headingInside = innerHtml.match(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i);
+            const rawAnchorContent = headingInside ? headingInside[1] : innerHtml
+              .replace(/<(?:span|div|small)\b[^>]*class=["'][^"']*(?:tag|hashtag|cat|badge|breadcrumb|meta|date)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|small)>/gi, " ");
             
-            let title = innerHtml.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+            let title = cleanScrapedTitle(rawAnchorContent);
             if (title.length > 15 && title.length < 200 && 
+                !title.startsWith("#") &&
                 !title.toLowerCase().includes("read more") && 
                 !title.toLowerCase().includes("comment") && 
                 !title.toLowerCase().includes("share") &&
@@ -2280,7 +2342,7 @@ async function scrapeAndAutoProcess() {
               
               if (!scrapedItems.some(l => l.link === href)) {
                 scrapedItems.push({
-                  title: decodeXml(title),
+                  title,
                   link: href,
                   description: `${source.name} category update. Open article for detailed news content.`,
                   pubDate: new Date().toISOString()
