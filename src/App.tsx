@@ -140,6 +140,12 @@ export default function App() {
   const [newSourceFeedUrl, setNewSourceFeedUrl] = useState("");
   const [newSourceType, setNewSourceType] = useState("National");
 
+  // Edit Existing Source State
+  const [editingSourceId, setEditingSourceId] = useState<string | null>(null);
+  const [editSourceName, setEditSourceName] = useState("");
+  const [editSourceFeedUrl, setEditSourceFeedUrl] = useState("");
+  const [editSourceType, setEditSourceType] = useState("National");
+
   // Auto Dismiss Alert helper
   const triggerAlert = (type: "success" | "error" | "info", message: string) => {
     setAlert({ type, message });
@@ -570,12 +576,50 @@ export default function App() {
       if (res.ok) {
         triggerAlert("success", `Removed "${name}" from monitored outlets.`);
         setSelectedSourceIds(prev => prev.filter(sId => sId !== id));
+        if (editingSourceId === id) setEditingSourceId(null);
         fetchData();
       } else {
         triggerAlert("error", "Failed to delete publication source.");
       }
     } catch (e) {
       triggerAlert("error", "Network error while deleting publication source.");
+    }
+  };
+
+  // Start editing an existing source
+  const handleStartEditSource = (source: NewsSource) => {
+    setEditingSourceId(source.id);
+    setEditSourceName(source.name);
+    setEditSourceFeedUrl(source.feedUrl);
+    setEditSourceType(source.type || "National");
+  };
+
+  // Save edited source changes
+  const handleSaveEditSource = async (e: React.FormEvent, id: string) => {
+    e.preventDefault();
+    if (!editSourceName.trim() || !editSourceFeedUrl.trim()) {
+      return triggerAlert("error", "Outlet name and feed URL cannot be empty.");
+    }
+    try {
+      const res = await fetch(`/api/sources/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: editSourceName.trim(),
+          feedUrl: editSourceFeedUrl.trim(),
+          url: editSourceFeedUrl.trim(),
+          type: editSourceType
+        })
+      });
+      if (res.ok) {
+        triggerAlert("success", `Updated outlet "${editSourceName.trim()}" successfully.`);
+        setEditingSourceId(null);
+        fetchData();
+      } else {
+        triggerAlert("error", "Failed to update publication source.");
+      }
+    } catch (e) {
+      triggerAlert("error", "Network error while saving source updates.");
     }
   };
 
@@ -1484,6 +1528,7 @@ export default function App() {
                         <option value="Politics">Politics</option>
                         <option value="Business">Business</option>
                         <option value="National">National</option>
+                        <option value="Security">Security</option>
                         <option value="General">General</option>
                         <option value="Economy">Economy</option>
                       </select>
@@ -1542,73 +1587,161 @@ export default function App() {
                     {sources.map((source: NewsSource) => {
                       const count = articles.filter(a => a.source === source.name).length;
                       const isSelected = selectedSourceIds.includes(source.id);
+                      const isEditing = editingSourceId === source.id;
                       return (
-                        <div key={source.id} className={`bg-[#162033]/95 p-5 rounded-2xl border transition-all shadow-sm flex items-start justify-between gap-4 ${isSelected ? "border-emerald-500/80 bg-emerald-950/20" : "border-slate-700/50"}`}>
-                          <div className="flex items-start gap-3 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setSelectedSourceIds(prev => [...prev, source.id]);
-                                } else {
-                                  setSelectedSourceIds(prev => prev.filter(sId => sId !== source.id));
-                                }
-                              }}
-                              className="mt-1 w-4 h-4 rounded border-slate-700 text-[#008751] focus:ring-[#008751] bg-[#0B0F1A] shrink-0 cursor-pointer"
-                            />
+                        <div key={source.id} className={`bg-[#162033]/95 p-5 rounded-2xl border transition-all shadow-sm flex flex-col gap-4 ${isSelected ? "border-emerald-500/80 bg-emerald-950/20" : isEditing ? "border-[#008751] bg-[#162033]" : "border-slate-700/50"}`}>
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex items-start gap-3 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedSourceIds(prev => [...prev, source.id]);
+                                  } else {
+                                    setSelectedSourceIds(prev => prev.filter(sId => sId !== source.id));
+                                  }
+                                }}
+                                className="mt-1 w-4 h-4 rounded border-slate-700 text-[#008751] focus:ring-[#008751] bg-[#0B0F1A] shrink-0 cursor-pointer"
+                              />
 
-                            <div className="space-y-1.5 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] bg-[#0B0F1A] font-mono text-green-300 border border-[#008751]/20 px-2 py-0.5 rounded font-bold uppercase">{source.type}</span>
-                                <span className="text-xs text-slate-400 font-mono">Harvested: {count} articles</span>
+                              <div className="space-y-1.5 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] bg-[#0B0F1A] font-mono text-green-300 border border-[#008751]/20 px-2 py-0.5 rounded font-bold uppercase">{source.type}</span>
+                                  <span className="text-xs text-slate-400 font-mono">Harvested: {count} articles</span>
+                                </div>
+                                
+                                <h4 className="text-base font-bold text-white tracking-tight truncate font-display">{source.name}</h4>
+                                <p className="text-xs text-green-400 truncate max-w-[240px]" title={source.feedUrl}>
+                                  {source.feedUrl}
+                                </p>
+                                
+                                {source.lastScrapedAt ? (
+                                  <span className="text-[10px] text-slate-455 block font-mono">
+                                    Last scrape: {new Date(source.lastScrapedAt).toLocaleTimeString()}
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] text-slate-455 italic block font-mono">Never triggered</span>
+                                )}
                               </div>
-                              
-                              <h4 className="text-base font-bold text-white tracking-tight truncate font-display">{source.name}</h4>
-                              <p className="text-xs text-green-400 truncate max-w-[200px]" title={source.feedUrl}>
-                                {source.feedUrl}
-                              </p>
-                              
-                              {source.lastScrapedAt ? (
-                                <span className="text-[10px] text-slate-455 block font-mono">
-                                  Last scrape: {new Date(source.lastScrapedAt).toLocaleTimeString()}
-                                </span>
-                              ) : (
-                                <span className="text-[10px] text-slate-455 italic block font-mono">Never triggered</span>
-                              )}
                             </div>
-                          </div>
 
-                          <div className="flex flex-col items-end gap-3 shrink-0">
-                            {/* TOGGLE SWITCH */}
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => handleToggleSource(source.id)}
-                                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                                  source.enabled ? "bg-[#008751]" : "bg-slate-800"
-                                }`}
-                              >
-                                <span
-                                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                                    source.enabled ? "translate-x-4" : "translate-x-0"
+                            <div className="flex flex-col items-end gap-3 shrink-0">
+                              {/* TOGGLE SWITCH */}
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleToggleSource(source.id)}
+                                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                    source.enabled ? "bg-[#008751]" : "bg-slate-800"
                                   }`}
-                                />
-                              </button>
-                              <span className={`text-[10px] font-mono font-semibold ${source.enabled ? "text-green-400" : "text-slate-400"}`}>
-                                {source.enabled ? "ENABLED" : "PAUSED"}
-                              </span>
-                            </div>
+                                >
+                                  <span
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                      source.enabled ? "translate-x-4" : "translate-x-0"
+                                    }`}
+                                  />
+                                </button>
+                                <span className={`text-[10px] font-mono font-semibold ${source.enabled ? "text-green-400" : "text-slate-400"}`}>
+                                  {source.enabled ? "ENABLED" : "PAUSED"}
+                                </span>
+                              </div>
 
-                            {/* DELETE BUTTON */}
-                            <button
-                              onClick={() => handleDeleteSource(source.id, source.name)}
-                              title="Delete source outlet"
-                              className="flex items-center gap-1 text-slate-400 hover:text-red-400 hover:bg-red-500/10 p-1.5 rounded-lg transition-colors border border-transparent hover:border-red-500/20 text-xs font-semibold cursor-pointer"
-                            >
-                              <Trash2 size={14} />
-                              <span>Delete</span>
-                            </button>
+                              {/* EDIT & DELETE BUTTONS */}
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  onClick={() => isEditing ? setEditingSourceId(null) : handleStartEditSource(source)}
+                                  title="Edit source outlet"
+                                  className={`flex items-center gap-1 p-1.5 rounded-lg transition-colors border text-xs font-semibold cursor-pointer ${
+                                    isEditing
+                                      ? "text-emerald-300 bg-emerald-500/15 border-emerald-500/30"
+                                      : "text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 border-transparent hover:border-emerald-500/20"
+                                  }`}
+                                >
+                                  <Edit3 size={14} />
+                                  <span>{isEditing ? "Close" : "Edit"}</span>
+                                </button>
+
+                                <button
+                                  onClick={() => handleDeleteSource(source.id, source.name)}
+                                  title="Delete source outlet"
+                                  className="flex items-center gap-1 text-slate-400 hover:text-red-400 hover:bg-red-500/10 p-1.5 rounded-lg transition-colors border border-transparent hover:border-red-500/20 text-xs font-semibold cursor-pointer"
+                                >
+                                  <Trash2 size={14} />
+                                  <span>Delete</span>
+                                </button>
+                              </div>
+                            </div>
                           </div>
+
+                          {/* INLINE EDIT FORM */}
+                          {isEditing && (
+                            <form
+                              onSubmit={(e) => handleSaveEditSource(e, source.id)}
+                              className="pt-3 border-t border-slate-700/60 space-y-3"
+                            >
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="block text-[10px] font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">
+                                    Outlet Name *
+                                  </label>
+                                  <input
+                                    type="text"
+                                    required
+                                    value={editSourceName}
+                                    onChange={(e) => setEditSourceName(e.target.value)}
+                                    className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-2.5 py-2 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-[10px] font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">
+                                    Category Theme
+                                  </label>
+                                  <select
+                                    value={editSourceType}
+                                    onChange={(e) => setEditSourceType(e.target.value)}
+                                    className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-2.5 py-2 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
+                                  >
+                                    <option value="Politics">Politics</option>
+                                    <option value="Business">Business</option>
+                                    <option value="National">National</option>
+                                    <option value="Security">Security</option>
+                                    <option value="General">General</option>
+                                    <option value="Economy">Economy</option>
+                                  </select>
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="block text-[10px] font-mono font-medium uppercase tracking-wider text-slate-400 mb-1">
+                                  RSS/XML or Category URL *
+                                </label>
+                                <input
+                                  type="url"
+                                  required
+                                  value={editSourceFeedUrl}
+                                  onChange={(e) => setEditSourceFeedUrl(e.target.value)}
+                                  className="w-full text-xs bg-[#0B0F1A] border border-slate-700/60 text-slate-100 rounded-xl px-2.5 py-2 focus:border-[#008751] focus:outline-none focus:ring-1 focus:ring-[#008751]"
+                                />
+                              </div>
+
+                              <div className="flex items-center justify-end gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingSourceId(null)}
+                                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="submit"
+                                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold text-white bg-[#008751] hover:bg-green-650 transition-colors shadow-sm cursor-pointer"
+                                >
+                                  <Save size={13} />
+                                  <span>Save Changes</span>
+                                </button>
+                              </div>
+                            </form>
+                          )}
                         </div>
                       );
                     })}

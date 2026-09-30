@@ -993,6 +993,7 @@ function parseRssXml(xmlText: string): Array<{ title: string; link: string; desc
     const titleMatch = itemContent.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i);
     const linkMatch = itemContent.match(/<link>([\s\S]*?)<\/link>/i);
     const descMatch = itemContent.match(/<description>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/description>/i);
+    const contentEncodedMatch = itemContent.match(/<content:encoded>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/content:encoded>/i);
     const pubDateMatch = itemContent.match(/<pubDate>([\s\S]*?)<\/pubDate>/i);
 
     if (linkMatch && linkMatch[1]) {
@@ -1000,7 +1001,13 @@ function parseRssXml(xmlText: string): Array<{ title: string; link: string; desc
       // clean url
       const url = rawUrl.replace(/<!\[CDATA\[|\]\]>/g, "").trim();
       const title = titleMatch ? decodeXml(titleMatch[1]) : "Nigerian News Headline";
-      const description = descMatch ? decodeXml(descMatch[1]) : "";
+      const rawEncoded = contentEncodedMatch && contentEncodedMatch[1]
+        ? contentEncodedMatch[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim()
+        : "";
+      const rawDesc = descMatch && descMatch[1]
+        ? descMatch[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim()
+        : "";
+      const description = rawEncoded.length > rawDesc.length ? rawEncoded : (rawDesc || decodeXml(rawDesc));
       const pubDate = pubDateMatch ? pubDateMatch[1].trim() : new Date().toISOString();
 
       items.push({ title, link: url, description, pubDate });
@@ -1387,14 +1394,317 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
   return result;
 }
 
-// Web Crawler helper to fetch raw HTML of original article and extract full text plus any image resources
+// Helper to sanitize inline HTML while strictly preserving bold (<strong>, <b>), italic (<em>, <i>), and hyperlinks (<a href="...">)
+function sanitizeInlineHtml(html: string, baseUrl?: string, allowBlockquoteChildren: boolean = false): string {
+  if (!html) return "";
+
+  let cleaned = html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
+    .replace(/<svg[\s\S]*?<\/svg>/gi, "")
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<figure[\s\S]*?<\/figure>/gi, "")
+    .replace(/<img\b[^>]*>/gi, "");
+
+  // Normalize valid <a href="..."> tags and unwrap invalid/anchor-only links
+  cleaned = cleaned.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_m, attrs, inner) => {
+    const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
+    if (!hrefMatch || !hrefMatch[1]) return inner;
+    const rawHref = hrefMatch[1].trim();
+    if (!rawHref || rawHref.startsWith("javascript:") || rawHref.startsWith("#")) return inner;
+    let href = rawHref;
+    if (baseUrl && !href.startsWith("http://") && !href.startsWith("https://") && !href.startsWith("mailto:")) {
+      try {
+        href = new URL(href, baseUrl).toString();
+      } catch (_) {}
+    }
+    return `<a href="${href.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+  });
+
+  // Strip non-whitelisted tags while preserving strong, b, em, i, a, and (if inside blockquote) p/br
+  cleaned = cleaned.replace(/<(\/?)([a-zA-Z0-9]+)\b([^>]*)>/gi, (fullMatch, slash, tagName) => {
+    const tag = tagName.toLowerCase();
+    const isClosing = slash === "/";
+
+    if (tag === "strong" || tag === "b" || tag === "em" || tag === "i") {
+      return isClosing ? `</${tag}>` : `<${tag}>`;
+    }
+    if (tag === "a") {
+      return isClosing ? "</a>" : fullMatch;
+    }
+    if (allowBlockquoteChildren && tag === "br") {
+      return "<br />";
+    }
+    if (allowBlockquoteChildren && tag === "p") {
+      return isClosing ? "</p>" : "<p>";
+    }
+    return "";
+  });
+
+  // Decode typography entities without corrupting HTML tag structure
+  cleaned = cleaned
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#8216;|&lsquo;/gi, "'")
+    .replace(/&#8217;|&rsquo;|&#39;|&#039;/gi, "'")
+    .replace(/&#8220;|&ldquo;/gi, '"')
+    .replace(/&#8221;|&rdquo;/gi, '"')
+    .replace(/&#8211;|&ndash;/gi, "–")
+    .replace(/&#8212;|&mdash;/gi, "—")
+    .replace(/&#8230;|&hellip;/gi, "...")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return cleaned;
+}
+
+// Helper to check if a single block's plain text is an advert, breadcrumb, metadata, or promotional junk
+function shouldExcludeBlockText(plainText: string, sourceName: string): boolean {
+  const p = plainText.trim();
+  if (!p) return true;
+  const lowerP = p.toLowerCase();
+
+  const lowerSource = (sourceName || "").toLowerCase();
+  const isKogiReports = lowerSource.includes("kogi") || lowerP.includes("kogireports.com");
+  const isDailyTrustOrTvc = lowerSource.includes("dailytrust") || lowerSource.includes("daily trust") || lowerSource.includes("tvc");
+
+  if (isHeaderExcludedPhrase(p) || isScriptRemnant(p) || isAdvertOrUpdateNewsPattern(p)) {
+    return true;
+  }
+
+  // The Nation / general spam & channel promotions
+  if (
+    /^\s*tags\s*:/i.test(p) ||
+    lowerP === "tags" ||
+    lowerP.includes("abuja doctor reveals a unique way") ||
+    lowerP.includes("congratulations, we just got you a job") ||
+    lowerP.includes("follow the nation newspaper on whatsapp") ||
+    lowerP.includes("join the nation channel") ||
+    lowerP.includes("subscribe to the nation newspaper telegram") ||
+    lowerP.includes("join the nation on telegram") ||
+    lowerP === "“>" ||
+    lowerP === "\">"
+  ) {
+    return true;
+  }
+
+  // Kogi Reports metadata & share blocks
+  if (isKogiReports || lowerP.includes("spread the love") || lowerP.includes("facebooktwittergoogle+")) {
+    if (
+      /^\s*By\s+admin\b/i.test(p) ||
+      /^\s*By\s+[a-z0-9_\s]{2,30}$/i.test(p) ||
+      /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}/i.test(p) ||
+      lowerP.includes("spread the love") ||
+      lowerP.includes("facebooktwittergoogle+") ||
+      lowerP.includes("post views:") ||
+      lowerP.startsWith("previous post") ||
+      lowerP.startsWith("next post") ||
+      lowerP.startsWith("recent news")
+    ) {
+      return true;
+    }
+  }
+
+  if (isDailyTrustOrTvc) {
+    if (
+      lowerP.includes("googletag") ||
+      lowerP.includes("window.googletag") ||
+      lowerP.includes("defineslot") ||
+      lowerP.includes("pubads") ||
+      lowerP.includes("div-gpt-ad") ||
+      lowerP.includes("invest ₦2.5 million") ||
+      lowerP.includes("premium domains") ||
+      lowerP.includes("daily trust whatsapp community") ||
+      lowerP.includes("join daily trust whatsapp") ||
+      lowerP.includes("quick access to news and happenings") ||
+      isAuthorPattern(p) ||
+      isDatePattern(p)
+    ) {
+      return true;
+    }
+  }
+
+  // Breadcrumbs & related links
+  const isBreadcrumb =
+    /^\s*home\s*[>»/|]/i.test(p) ||
+    (lowerP.startsWith("home ") && (lowerP.includes(" > ") || lowerP.includes(" » ") || lowerP.includes(" / ") || lowerP.includes(" | "))) ||
+    /^\s*home\s+topics\s+/i.test(p) ||
+    /^\s*home\s+news\s+/i.test(p) ||
+    /^\s*(uncategorized|uncategproze)\b/i.test(p);
+  if (isBreadcrumb) return true;
+
+  if (
+    lowerP === "advertisement" ||
+    lowerP === "also read" ||
+    lowerP === "read more" ||
+    lowerP === "sponsor ad" ||
+    lowerP === "advert" ||
+    lowerP === "advert –>" ||
+    lowerP === "–>" ||
+    lowerP === "-->" ||
+    lowerP.startsWith("also read") ||
+    lowerP.startsWith("read also") ||
+    lowerP.startsWith("read more") ||
+    lowerP.startsWith("advertisement") ||
+    lowerP.startsWith("related news") ||
+    lowerP.startsWith("related post") ||
+    lowerP.startsWith("related article") ||
+    lowerP.startsWith("inline related") ||
+    /related:\s/i.test(p) ||
+    /\[related\]/i.test(p)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+// Extract structured HTML blocks (<p>, <h3>, <h4>, <blockquote>, <ul>, <ol>) preserving verbatim inline formatting and links
+function extractStructuredArticleBlocks(
+  rawInput: string,
+  sourceName: string,
+  baseUrl?: string,
+  articleTitle?: string
+): string[] {
+  if (!rawInput) return [];
+
+  let html = rawInput
+    // Strip any previously appended What You Should Know or Media Partner Credit sections (if re-enriching)
+    .replace(/<h3[^>]*>\s*What You Should Know\s*<\/h3>[\s\S]*$/i, "")
+    .replace(/<hr[^>]*>\s*<p[^>]*>\s*(?:News\s+)?Credit to our media partner[\s\S]*$/i, "");
+
+  // Source-level cutoff markers on raw HTML before block parsing
+  const cutoffPatterns: RegExp[] = [
+    /<[^>]+>\s*TAGS\s*:\s*<\/[^>]+>/i,
+    /\bTAGS\s*:/i,
+    /Abuja doctor reveals a unique way/i,
+    /Congratulations, we just got you a job!/i,
+    /Follow The Nation Newspaper on WhatsApp/i,
+    /Join The Nation Channel/i,
+    /Subscribe to The Nation Newspaper Telegram channel/i,
+    /Join The Nation on Telegram/i,
+    /\bSpread the love\b/i,
+    /FacebookTwitterGoogle\+Linkedin/i,
+    /Post Views:\s*\d+/i,
+    /<[^>]+>\s*Previous Post\s*<\/[^>]+>/i,
+    /<[^>]+>\s*Next Post\s*<\/[^>]+>/i,
+    /<[^>]+>\s*Recent News\s*<\/[^>]+>/i
+  ];
+
+  for (const marker of cutoffPatterns) {
+    const idx = html.search(marker);
+    if (idx !== -1) {
+      html = html.substring(0, idx);
+    }
+  }
+
+  const blocks: string[] = [];
+  const hasBlockTags = /<(?:p|h[234]|blockquote|ul|ol)\b/i.test(html);
+
+  if (hasBlockTags) {
+    const blockRegex = /<(blockquote|ul|ol|h2|h3|h4|p)\b[^>]*>([\s\S]*?)<\/\1>/gi;
+    let match;
+    while ((match = blockRegex.exec(html)) !== null) {
+      const tag = match[1].toLowerCase();
+      const innerRaw = match[2];
+      const plainText = decodeAndCleanHtml(innerRaw).trim();
+
+      if (!plainText) continue;
+      if (shouldExcludeBlockText(plainText, sourceName)) continue;
+
+      if (tag === "ul" || tag === "ol") {
+        const liRegex = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
+        const validLis: string[] = [];
+        let liMatch;
+        while ((liMatch = liRegex.exec(innerRaw)) !== null) {
+          const liPlain = decodeAndCleanHtml(liMatch[1]).trim();
+          if (!liPlain || shouldExcludeBlockText(liPlain, sourceName)) continue;
+          if (/^\d+\s+(?:seconds?|minutes?|hours?|days?)\s+ago$/i.test(liPlain)) continue;
+          const sanitizedLi = sanitizeInlineHtml(liMatch[1], baseUrl);
+          if (sanitizedLi) {
+            validLis.push(`  <li>${sanitizedLi}</li>`);
+          }
+        }
+        if (validLis.length > 0) {
+          blocks.push(`<${tag}>\n${validLis.join("\n")}\n</${tag}>`);
+        }
+      } else if (tag === "blockquote") {
+        if (plainText.length < 5) continue;
+        const sanitizedQuote = sanitizeInlineHtml(innerRaw, baseUrl, true);
+        if (sanitizedQuote) {
+          blocks.push(`<blockquote>${sanitizedQuote}</blockquote>`);
+        }
+      } else if (tag === "h2" || tag === "h3" || tag === "h4") {
+        if (plainText.length < 3) continue;
+        const outHeadingTag = tag === "h2" ? "h3" : tag;
+        const sanitizedHeading = sanitizeInlineHtml(innerRaw, baseUrl);
+        if (sanitizedHeading) {
+          blocks.push(`<${outHeadingTag}>${sanitizedHeading}</${outHeadingTag}>`);
+        }
+      } else if (tag === "p") {
+        if (plainText.length < 12) continue;
+        const sanitizedP = sanitizeInlineHtml(innerRaw, baseUrl);
+        if (sanitizedP) {
+          blocks.push(`<p>${sanitizedP}</p>`);
+        }
+      }
+    }
+  }
+
+  // Fallback if no HTML block tags were matched (e.g., plain text input)
+  if (blocks.length === 0) {
+    const cleanedPlain = cleanScrapedArticleText(decodeAndCleanHtml(html), sourceName);
+    let rawParagraphs = cleanedPlain.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    if (rawParagraphs.length <= 1) {
+      rawParagraphs = cleanedPlain.split(/\n+/).map(p => p.trim()).filter(Boolean);
+    }
+    for (const p of rawParagraphs) {
+      if (p.length >= 12 && !shouldExcludeBlockText(p, sourceName)) {
+        blocks.push(`<p>${p}</p>`);
+      }
+    }
+  }
+
+  // Strip leading junk blocks (e.g. duplicate title, "Top News", "Breaking News", hashtags, or tiny <25 char opener)
+  const cleanTitleNorm = (articleTitle || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  while (blocks.length > 1) {
+    const firstBlock = blocks[0];
+    const firstPlain = decodeAndCleanHtml(firstBlock).trim();
+    const firstLower = firstPlain.toLowerCase();
+    const firstNorm = firstLower.replace(/[^a-z0-9]/g, "");
+
+    const isTitleDup =
+      cleanTitleNorm.length > 5 &&
+      (firstNorm === cleanTitleNorm || (firstNorm.length > 5 && cleanTitleNorm.includes(firstNorm)));
+    const isJunkHeader =
+      /^(top news|breaking|breaking news|nigerian news|news|update|just in|trending|uncategorized|uncategproze)$/i.test(firstPlain) ||
+      firstLower.includes("top news") ||
+      firstLower.includes("breaking news") ||
+      firstLower.includes("uncategorized") ||
+      firstLower.includes("uncategproze");
+    const isHashtagsOnly =
+      firstPlain.includes("#") && firstPlain.split(/\s+/).every(w => w.startsWith("#") || w.trim() === "");
+    const isTinyParagraph = /^<p\b/i.test(firstBlock) && firstPlain.length < 25;
+
+    if (isTitleDup || isJunkHeader || isHashtagsOnly || isTinyParagraph) {
+      blocks.shift();
+    } else {
+      break;
+    }
+  }
+
+  return blocks;
+}
+
+// Web Crawler helper to fetch raw HTML of original article and extract full text, structured blocks, plus any image resources
 async function fetchFullPageAndImages(url: string, sourceName: string): Promise<{
   fullText: string;
+  structuredBlocks: string[];
   featuredImage: string | null;
   imageUrls: string[];
 }> {
   if (!url || url.includes("manual-") || url.includes("mock-url") || !url.startsWith("http")) {
-    return { fullText: "", featuredImage: null, imageUrls: [] };
+    return { fullText: "", structuredBlocks: [], featuredImage: null, imageUrls: [] };
   }
 
   try {
@@ -1421,7 +1731,7 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
 
     if (!response.ok || response.status === 404) {
       addLog("warn", `Webpage crawler returned HTTP status ${response.status} for ${url} (Skipping 404 / broken link)`, "scraper");
-      return { fullText: "HTTP_404_ERROR", featuredImage: null, imageUrls: [] };
+      return { fullText: "HTTP_404_ERROR", structuredBlocks: [], featuredImage: null, imageUrls: [] };
     }
 
     const html = await response.text();
@@ -1439,7 +1749,7 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       lowerHtml.includes("the page you are looking for does not exist")
     ) {
       addLog("warn", `Detected 404 / Page Not Found content in HTML for ${url}`, "scraper");
-      return { fullText: "HTTP_404_ERROR", featuredImage: null, imageUrls: [] };
+      return { fullText: "HTTP_404_ERROR", structuredBlocks: [], featuredImage: null, imageUrls: [] };
     }
 
     const imageUrls: string[] = [];
@@ -1508,92 +1818,104 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
       .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
       .replace(/<aside[\s\S]*?<\/aside>/gi, "")
       .replace(/<form[\s\S]*?<\/form>/gi, "")
-      .replace(/<div\s+[^>]*class=["'][^"']*(?:sidebar|related|comments|share|tags|author|post-views|recent-posts)[^"']*["'][\s\S]*?<\/div>/gi, "");
+      .replace(/<div\s+[^>]*class=["'][^"']*(?:sidebar|related|comments|share|sharedaddy|jp-relatedposts|tags|post-tags|author|post-views|recent-posts|post-navigation)[^"']*["'][\s\S]*?<\/div>/gi, "");
 
-    // Try to isolate main text block matching articles across Channelstv, TVC, Arise, PremiumTimes, KogiReports, TheNation, TheCable, Saharareporters, Eagleonline
+    // Try to isolate main text block matching articles across Nigerian portals (picking the richest <article> or content container)
     let articleContentHtml = "";
-    const articleTagMatch = cleanHtml.match(/<article[\s\S]*?<\/article>/i);
-    if (articleTagMatch) {
-      articleContentHtml = articleTagMatch[0];
-    } else {
-      const containerRegex = /<div\s+[^>]*class=["'][^"']*(?:entry-content|td-post-content|post-content|article-content|story-body|field-name-body|main-content|page-content|story-content)[^"']*["'][\s\S]*$/i;
-      const match = cleanHtml.match(containerRegex);
-      if (match) {
-        articleContentHtml = match[0];
+    const articleMatches = cleanHtml.match(/<article[\s\S]*?<\/article>/gi);
+    if (articleMatches && articleMatches.length > 0) {
+      articleContentHtml = articleMatches.reduce((best, curr) => (curr.length > best.length ? curr : best), "");
+    }
+    const pCountInArticle = (articleContentHtml.match(/<p\b/gi) || []).length;
+    if (!articleContentHtml || pCountInArticle < 2) {
+      const containerRegex = /<div\s+[^>]*class=["'][^"']*(?:entry-content|td-post-content|post-content|article-content|story-body|field-name-body|main-content|page-content|story-content|single-post-content|theiaPostSlider_slides)[^"']*["'][\s\S]*$/i;
+      const cMatch = cleanHtml.match(containerRegex);
+      if (cMatch && cMatch[0].length > articleContentHtml.length) {
+        articleContentHtml = cMatch[0];
       }
     }
 
     const targetHtml = articleContentHtml || cleanHtml;
 
-    // Extract all <p> paragraphs for complete narrative extraction
-    const pRegex = /<p\b[^>]*>([\s\S]*?)<\/p>/gi;
-    const extractedParagraphs: string[] = [];
-    let pMatch;
-
-    while ((pMatch = pRegex.exec(targetHtml)) !== null) {
-      let pText = pMatch[1]
-        .replace(/<[^>]*>/g, " ")
-        .replace(/&nbsp;/gi, " ")
-        .replace(/&amp;/gi, "&")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">")
-        .replace(/&quot;/gi, '"')
-        .replace(/&#8217;/gi, "'")
-        .replace(/&#8220;/gi, '"')
-        .replace(/&#8221;/gi, '"')
-        .replace(/&#8211;/gi, "-")
-        .replace(/&#8212;/gi, "—")
-        .replace(/&rsquo;/gi, "'")
-        .replace(/&lsquo;/gi, "'")
-        .replace(/&rdquo;/gi, '"')
-        .replace(/&ldquo;/gi, '"')
-        .replace(/\s+/g, " ")
-        .trim();
-
-      if (pText.length > 12) {
-        extractedParagraphs.push(pText);
+    // Extract structured blocks (<p>, <h3>, <h4>, <blockquote>, <ul>, <ol>) preserving inline bold/italic/links
+    let structuredBlocks = extractStructuredArticleBlocks(targetHtml, sourceName, url);
+    if (structuredBlocks.length < 2 && targetHtml !== cleanHtml) {
+      const fallbackBlocks = extractStructuredArticleBlocks(cleanHtml, sourceName, url);
+      if (fallbackBlocks.length > structuredBlocks.length) {
+        structuredBlocks = fallbackBlocks;
       }
     }
 
-    let cleanText = "";
-    if (extractedParagraphs.length > 0) {
-      cleanText = extractedParagraphs.join("\n\n");
-    } else {
-      cleanText = targetHtml
-        .replace(/<\/p>/gi, "\n\n")
-        .replace(/<p[^>]*>/gi, "\n\n")
-        .replace(/<br\s*\/?>/gi, "\n")
-        .replace(/<[^>]*>/g, " ")
-        .replace(/&nbsp;/gi, " ")
-        .replace(/&amp;/gi, "&")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">")
-        .replace(/&quot;/gi, '"')
-        .replace(/[ \t]+/g, " ")
-        .split(/\n+/)
-        .map(line => line.trim())
-        .filter(line => line.length > 0)
-        .join("\n\n")
-        .trim();
+    let cleanText = structuredBlocks
+      .map(b => decodeAndCleanHtml(b))
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
+
+    if (!cleanText) {
+      cleanText = cleanScrapedArticleText(decodeAndCleanHtml(targetHtml), sourceName);
     }
 
-    // Sanitize scraped source texts to avoid any Google adverts, breadcrumbs, related info, or 404 fragments
-    cleanText = cleanScrapedArticleText(cleanText, sourceName);
-
-    addLog("success", `Crawled original webpage successfully. Extracted ${cleanText.length} characters, featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
+    addLog("success", `Crawled original webpage successfully. Extracted ${structuredBlocks.length} content blocks (${cleanText.length} chars), featured image: ${featuredImage ? "Yes" : "No"}`, "scraper");
 
     return {
       fullText: cleanText,
+      structuredBlocks,
       featuredImage,
       imageUrls: imageUrls.slice(0, 8)
     };
   } catch (err: any) {
     addLog("error", `Web webpage crawler failed for ${url} (${err.message})`, "scraper");
-    return { fullText: "", featuredImage: null, imageUrls: [] };
+    return { fullText: "", structuredBlocks: [], featuredImage: null, imageUrls: [] };
   }
 }
 
-// Editorial & Styling Agents
+// Helper to build the "What You Should Know" section and Media Partner Credit footer
+function appendEditorialSections(
+  firstParagraphHtml: string,
+  remainingBlocks: string[],
+  whatYouShouldKnowBodyHtml: string,
+  articleUrl?: string,
+  sourceName?: string
+): string {
+  const parts: string[] = [];
+
+  if (firstParagraphHtml && firstParagraphHtml.trim()) {
+    const trimmedFirst = firstParagraphHtml.trim();
+    parts.push(/^<p\b/i.test(trimmedFirst) ? trimmedFirst : `<p>${trimmedFirst}</p>`);
+  }
+
+  if (remainingBlocks.length > 0) {
+    parts.push(remainingBlocks.join("\n\n"));
+  }
+
+  // Append "What You Should Know" Layman Section
+  let laymanContent = (whatYouShouldKnowBodyHtml || "").trim();
+  // Remove duplicate <h3>What You Should Know</h3> if the AI included it inside whatYouShouldKnowHtml
+  laymanContent = laymanContent.replace(/^<h3[^>]*>\s*What You Should Know\s*<\/h3>\s*/i, "").trim();
+  if (!laymanContent) {
+    laymanContent = `<p>This development carries direct implications for everyday citizens and stakeholders. Positively, timely implementation and transparency can improve public service delivery, economic confidence, and community welfare. Conversely, any delays, rising costs, or regulatory friction could pose short-term challenges for households and local businesses.</p>`;
+  } else if (!/^<(?:p|ul|ol)\b/i.test(laymanContent)) {
+    laymanContent = `<p>${laymanContent}</p>`;
+  }
+
+  parts.push(`<h3>What You Should Know</h3>\n${laymanContent}`);
+
+  // Append Media Partner Credit at the very end
+  if (articleUrl && sourceName) {
+    parts.push(
+      `<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />\n<p>\n Credit to our media partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName}</a>.\n</p>`
+    );
+  }
+
+  return parts.join("\n\n");
+}
+
+// Editorial & Curation Agent:
+// 1. Isolates and paraphrases ONLY the first paragraph (preserving core message, announcement, names, key facts)
+// 2. Preserves all subsequent content (<p>, <h3>, <h4>, <blockquote>, <ul>, <ol>, bold/italic, <a href="...">) verbatim
+// 3. Appends "<h3>What You Should Know</h3>" layman impact section (positive & negative implications for everyday readers)
+// 4. Appends bottom divider and Media Partner Credit
 async function runAIElegancyAgent(
   originalTitle: string,
   originalSnippet: string,
@@ -1606,13 +1928,14 @@ async function runAIElegancyAgent(
   contentHtml: string;
   featuredImage: string | null;
 }> {
-  let textToAnalyze = originalSnippet;
+  let textToAnalyze = originalSnippet || "";
   let imagesFound: string[] = [];
   let crawlerFeaturedImage: string | null = null;
+  let structuredBlocks: string[] = extractStructuredArticleBlocks(originalSnippet, sourceName || "", articleUrl, originalTitle);
 
   try {
     const ai = await getGeminiClient();
-    addLog("info", `Editorial Agent research triggered for "${originalTitle}"`, "summarizer");
+    addLog("info", `Editorial Curation Agent triggered for "${originalTitle}"`, "summarizer");
     
     // Fetch full webpage context first
     if (articleUrl && sourceName) {
@@ -1620,94 +1943,115 @@ async function runAIElegancyAgent(
       if (crawl.fullText === "HTTP_404_ERROR") {
         throw new Error("ARTICLE_404_NOT_FOUND");
       }
-      if (crawl.fullText) {
+      if (crawl.structuredBlocks.length >= structuredBlocks.length && crawl.structuredBlocks.length > 0) {
+        structuredBlocks = extractStructuredArticleBlocks(crawl.structuredBlocks.join("\n"), sourceName, articleUrl, originalTitle);
+      }
+      if (crawl.fullText && crawl.fullText.length > decodeAndCleanHtml(textToAnalyze).length) {
         textToAnalyze = crawl.fullText;
       }
       imagesFound = crawl.imageUrls;
       crawlerFeaturedImage = crawl.featuredImage;
     }
 
+    // Isolate First Paragraph vs. Verbatim Remaining Content Blocks
+    const firstPIdx = structuredBlocks.findIndex(b => /^<p\b/i.test(b));
+    const firstParagraphBlock = firstPIdx !== -1 ? structuredBlocks[firstPIdx] : (structuredBlocks[0] || `<p>${decodeAndCleanHtml(originalSnippet)}</p>`);
+    const firstParagraphPlain = decodeAndCleanHtml(firstParagraphBlock);
+    const verbatimRemainingBlocks = firstPIdx !== -1
+      ? structuredBlocks.filter((_, idx) => idx !== firstPIdx)
+      : structuredBlocks.slice(1);
+
+    const fullPlainContext = structuredBlocks.map(b => decodeAndCleanHtml(b)).join("\n\n") || decodeAndCleanHtml(textToAnalyze);
+
     const inputImagesText = imagesFound.length > 0
       ? `Extracted Available Image URLs from Source Webpage:\n${imagesFound.map((img, i) => `[Image ${i + 1}]: ${img}`).join("\n")}`
       : "No image URLs could be extracted from the source website.";
 
     const userPrompt = `You are the Lead Editorial AI Agent for "SaaMedia News Agent", an elite Nigerian news portal.
-Your task is to take these news details and draft a highly comprehensive, premium full-length news article.
+Your task is to curate this news article according to strict editorial specifications.
 
 SOURCE DETAILS:
 - Original Title: "${originalTitle}"
 - Source Publisher: "${sourceName || "Unknown"}"
 - Article Link: "${articleUrl || ""}"
-- Crawled Full Webpage Text Content:
-"${textToAnalyze}"
+- Isolated First Paragraph to Paraphrase:
+"${firstParagraphPlain}"
+- Full Article Context (for understanding the whole story and writing the "What You Should Know" section):
+"${fullPlainContext}"
 
 MEDIA ASSETS:
 ${inputImagesText}
 
-INSTRUCTIONS:
-1. Write a Captivating, SEO-Optimized Title (polished, professional, customized for high engagement).
-2. Write a Professional Short Summary (1-2 sentences) of the core development.
+STRICT EDITORIAL SPECIFICATIONS:
+1. Write a Captivating, SEO-Optimized Title (polished, professional, accurate).
+2. Write a Professional Short Summary (1-2 sentences) of the core development for social alerts.
 3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
-4. Write a highly thorough, complete full-length news story, preserving the EXACT original separation of paragraphs in the crawled webpage. Each individual paragraph in the input text MUST be written as its own separate HTML paragraph (using a separate <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'> tag). Do NOT combine, merge, or condense multiple paragraphs into one giant block; instead, articulate and arrange them sequentially matching the natural flow of the news source report. Include every possible detail (descriptions, data, quotes, and timelines).
-   - UNLIMITED LENGTH MANDATE: You MUST make the news story unlimited in character or word count. No matter how long the original news story or article is, it must be fully translated/recreated without any truncating, shortening, condensing, summarizing, or abbreviation. Every single original paragraph, fact, direct/indirect quote, background context, sub-details, and list item must be preserved at full narrative length. Output the complete unabridged narrative.
-   - Format the entire news story cleanly in HTML, styling multiple paragraphs with <p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>.
-   - Do NOT include html/head/body outer tags. Just inner tags like <p>, <h3>, <strong>, <em>.
-   - IMPORTANT IMAGE DUPLICATION RULE: You MUST NOT embed the elected Featured Image anywhere inside the article contentHtml body string. This is crucial because WordPress automatically displays the Featured Image at the top of the post on saamedia.com.ng. Placing it inside contentHtml would cause duplicate images on the webpage.
-   - If the original article crawled images list is empty, or only contains unusable URLs, you MUST select one of these highly relevant high-resolution photo URLs based on your category as the featuredImage (but still do NOT embed it inside contentHtml):
-     * Politics / National Policy:
-       https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?q=80&w=1000&auto=format&fit=crop
-       https://images.unsplash.com/photo-1529107386315-e1a2ed48a620?q=80&w=1000&auto=format&fit=crop
-     * National / Daily Life / Public:
-       https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop
-       https://images.unsplash.com/photo-1565538810844-1e119add165a?q=80&w=1000&auto=format&fit=crop
-     * Business & Finance / Economy / Oil:
-       https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?q=80&w=1000&auto=format&fit=crop
-       https://images.unsplash.com/photo-1590283603385-17ffb3a7f29f?q=80&w=1000&auto=format&fit=crop
-       https://images.unsplash.com/photo-1518709268805-4e9042af9f23?q=80&w=1000&auto=format&fit=crop
-     * Security / Defense / Police:
-       https://images.unsplash.com/photo-1557597774-9d273605dfa9?q=80&w=1000&auto=format&fit=crop
-       https://images.unsplash.com/photo-1450133064473-71024230f91b?q=80&w=1000&auto=format&fit=crop
-     
-   - STRICTOR NO-INLINE-IMAGES MANDATE: You MUST NOT embed any images, photos, or media tags (neither the elected Featured Image nor any secondary/supporting/inline images) inside the contentHtml string. The contentHtml MUST be purely textual, structured only with standard tags like <p>, <h3>, <strong>, and <em>. This is crucial to keep the news content perfectly clean and avoid duplicate or redundant photos on the saamedia.com.ng post view. All inline images/photos are strictly forbidden!
-
-     
-   - To ensure flawless serialization in JSON, do NOT use raw double quotes inside the HTML code block. Instead, use single quotes (e.g. style='margin-bottom: 20px;') or escape double quotes properly to avoid unescaped backslash JSON parsing crashes!
-     
-   - Do NOT append any news source partner credits, back links, reference footers, or footnote/citation blocks at the bottom of the article. Focus entirely on the human-like editorial storytelling text.
-   - STRICTOR EXCLUSIONS: You MUST absolutely avoid, skip, and delete any Google adverts, window.googletag script tags or plain code left-overs, premium domains investing advertisements, WhatsApp community prompts, DailyTrust or TVC News source breadcrumbs, "ADVERTISEMENT", "ALSO READ", "READ MORE" labels/headlines, and any inline related posts, news, or articles links/sections from the news content.
-
-5. Decide which URL represents the elected Featured Image for the WordPress thumbnail registration, and verify it matches the "featuredImage" property in your JSON output.
+4. Paraphrase ONLY the First Paragraph ("paraphrasedFirstParagraph"):
+   - Refine and paraphrase ONLY the isolated first paragraph above while strictly preserving its core message, announcement, names, dates, locations, and key facts.
+   - Return ONLY the paraphrased first paragraph text (you may use <strong> or <em> if appropriate, without outer <p> tags). Do NOT rewrite or include the rest of the article here, because all subsequent paragraphs, subheadings, blockquotes, lists, and links from the source are automatically preserved verbatim.
+5. Write the "What You Should Know" Layman Section ("whatYouShouldKnowHtml"):
+   - Simplify and summarize the entire story in accessible, everyday layman terms.
+   - Clearly explain what the news means and how it can affect everyday people and readers both POSITIVELY (benefits, convenience, relief, or opportunities) and/or NEGATIVELY (risks, drawbacks, costs, challenges, or industry disruption).
+   - Format "whatYouShouldKnowHtml" using clean HTML <p> and/or <ul><li> tags (do NOT include the <h3>What You Should Know</h3> heading tag itself, as the system prepends <h3>What You Should Know</h3> automatically).
+6. Select the Featured Image ("featuredImage"):
+   - Pick the best article image URL from MEDIA ASSETS above, or if empty/unusable, pick one of these high-resolution fallback URLs based on category:
+     * Politics: https://images.unsplash.com/photo-1540910419892-4a36d2c3266c?q=80&w=1000&auto=format&fit=crop
+     * National: https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop
+     * Business / Economy: https://images.unsplash.com/photo-1526304640581-d334cdbbf45e?q=80&w=1000&auto=format&fit=crop
+     * Security: https://images.unsplash.com/photo-1557597774-9d273605dfa9?q=80&w=1000&auto=format&fit=crop
 
 Respond strictly in valid JSON format matching this schema:
 {
   "title": "Clean, engaging headline",
-  "summary": "1-2 sentence quick news summary for WhatsApp or mobile grids",
+  "summary": "1-2 sentence quick news summary",
   "category": "One of: Politics, Business, Security, Economy, National",
-  "featuredImage": "Selected image URL string representing featured image",
-  "contentHtml": "HTML string containing the full-length news content as text-only (DO NOT embed any images or inline photos at all) and do NOT append any credit footers"
-}
+  "featuredImage": "Selected image URL string",
+  "paraphrasedFirstParagraph": "Refined and paraphrased first paragraph preserving all core facts and names",
+  "whatYouShouldKnowHtml": "<p>Accessible layman summary explaining what this means...</p><ul><li><strong>Positive Impact:</strong> ...</li><li><strong>Potential Concerns:</strong> ...</li></ul>"
+}`;
 
-Ensure your response is valid JSON and only returns the JSON block. Do not wrap it in markdown codeblocks like \`\`\`json.`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: userPrompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            summary: { type: Type.STRING },
-            category: { type: Type.STRING },
-            featuredImage: { type: Type.STRING, nullable: true },
-            contentHtml: { type: Type.STRING }
-          },
-          required: ["title", "summary", "category", "contentHtml"]
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: "gemini-3.8-flash",
+        contents: userPrompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              summary: { type: Type.STRING },
+              category: { type: Type.STRING },
+              featuredImage: { type: Type.STRING, nullable: true },
+              paraphrasedFirstParagraph: { type: Type.STRING },
+              whatYouShouldKnowHtml: { type: Type.STRING }
+            },
+            required: ["title", "summary", "category", "paraphrasedFirstParagraph", "whatYouShouldKnowHtml"]
+          }
         }
-      }
-    });
+      });
+    } catch (_modelErr) {
+      response = await ai.models.generateContent({
+        model: "gemini-flash-latest",
+        contents: userPrompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              summary: { type: Type.STRING },
+              category: { type: Type.STRING },
+              featuredImage: { type: Type.STRING, nullable: true },
+              paraphrasedFirstParagraph: { type: Type.STRING },
+              whatYouShouldKnowHtml: { type: Type.STRING }
+            },
+            required: ["title", "summary", "category", "paraphrasedFirstParagraph", "whatYouShouldKnowHtml"]
+          }
+        }
+      });
+    }
 
     let bodyText = response.text ? response.text.trim() : "";
     if (bodyText.startsWith("```json")) {
@@ -1722,57 +2066,53 @@ Ensure your response is valid JSON and only returns the JSON block. Do not wrap 
     bodyText = bodyText.trim();
 
     const parsed = JSON.parse(bodyText);
-    addLog("success", `Editorial AI Agent generated article successfully. Title: ${parsed.title}, Category: ${parsed.category}`, "summarizer");
-    
-    let finalContentHtml = parsed.contentHtml || `<p>${originalSnippet}</p>`;
-    
-    // Clean up unneeded first paragraphs
-    finalContentHtml = cleanFirstParagraphsHtml(finalContentHtml, parsed.title || originalTitle);
+    addLog("success", `Editorial AI Agent curated article successfully (1st paragraph paraphrased, ${verbatimRemainingBlocks.length} remaining blocks preserved verbatim, What You Should Know appended).`, "summarizer");
 
-    if (articleUrl && sourceName && !finalContentHtml.includes("News Credit to") && !finalContentHtml.includes("media partner")) {
-      finalContentHtml += `
-<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p>
- Credit to our Media Partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
-</p>`;
-    }
+    const paraphrasedFirstHtml = parsed.paraphrasedFirstParagraph
+      ? `<p>${sanitizeInlineHtml(parsed.paraphrasedFirstParagraph, articleUrl)}</p>`
+      : firstParagraphBlock;
+
+    const finalContentHtml = appendEditorialSections(
+      paraphrasedFirstHtml,
+      verbatimRemainingBlocks,
+      parsed.whatYouShouldKnowHtml || "",
+      articleUrl,
+      sourceName
+    );
 
     return {
       title: parsed.title || originalTitle,
-      summary: parsed.summary || originalSnippet.substring(0, 150),
+      summary: parsed.summary || firstParagraphPlain.substring(0, 160),
       category: parsed.category || "National",
       contentHtml: finalContentHtml,
       featuredImage: parsed.featuredImage || crawlerFeaturedImage || "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
     };
   } catch (e: any) {
-    addLog("error", `Editorial AI Agent failed: ${e.message}. Using high-quality backup layout.`, "summarizer");
+    if (e.message === "ARTICLE_404_NOT_FOUND") {
+      throw e;
+    }
+    addLog("error", `Editorial AI Agent failed: ${e.message}. Preserving verbatim content with fallback layman section.`, "summarizer");
     console.error("Editorial AI Agent Failed, falling back...", e);
-    // Generic high-quality backup matching user requirements using full webpage crawled text!
-    let paragraphs = textToAnalyze.split("\n\n").map(p => p.trim()).filter(Boolean);
-    if (paragraphs.length <= 1) {
-      paragraphs = textToAnalyze.split("\n").map(p => p.trim()).filter(Boolean);
-    }
-    
-    // Clean, text-only paragraph list (no inline images)
-    let fallbackHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
 
-    if (!fallbackHtml || fallbackHtml.trim() === "" || fallbackHtml.trim() === "<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'></p>") {
-      fallbackHtml = `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${originalSnippet}</p>`;
-    }
+    const firstPIdx = structuredBlocks.findIndex(b => /^<p\b/i.test(b));
+    const firstParagraphBlock = firstPIdx !== -1 ? structuredBlocks[firstPIdx] : (structuredBlocks[0] || `<p>${decodeAndCleanHtml(originalSnippet)}</p>`);
+    const verbatimRemainingBlocks = firstPIdx !== -1
+      ? structuredBlocks.filter((_, idx) => idx !== firstPIdx)
+      : structuredBlocks.slice(1);
 
-    fallbackHtml = cleanFirstParagraphsHtml(fallbackHtml, originalTitle);
+    const fallbackLaymanHtml = `<p>In simple terms, this report regarding <strong>${decodeAndCleanHtml(originalTitle)}</strong> highlights key developments that may impact citizens and stakeholders. On the positive side, constructive action and policy clarity can bring convenience, accountability, and opportunities for the public. On the other hand, any implementation delays, added costs, or operational disruptions could pose challenges for everyday people and affected sectors.</p>`;
 
-    if (articleUrl && sourceName && !fallbackHtml.includes("News Credit to") && !fallbackHtml.includes("media partner")) {
-      fallbackHtml += `
-<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p>
- Credit to our Media Partner <a href="${articleUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${sourceName} </a>.
-</p>`;
-    }
+    const fallbackHtml = appendEditorialSections(
+      firstParagraphBlock,
+      verbatimRemainingBlocks,
+      fallbackLaymanHtml,
+      articleUrl,
+      sourceName
+    );
 
     return {
       title: `${originalTitle}`,
-      summary: originalSnippet ? originalSnippet.substring(0, 150) + "..." : "Local news update from Nigerian top sources.",
+      summary: decodeAndCleanHtml(firstParagraphBlock).substring(0, 150) + "...",
       category: "National",
       contentHtml: fallbackHtml,
       featuredImage: crawlerFeaturedImage || "https://images.unsplash.com/photo-1590674899484-d564fa3f6760?q=80&w=1000&auto=format&fit=crop"
@@ -2045,28 +2385,18 @@ async function scrapeAndAutoProcess() {
               addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
               continue;
             }
-            if (crawl.fullText) {
-              let paragraphs = crawl.fullText.split("\n\n").map(p => p.trim()).filter(Boolean);
-              if (paragraphs.length <= 1) {
-                paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
-              }
-              let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
-
-              // Apply the cleaning!
-              draftHtml = cleanFirstParagraphsHtml(draftHtml, item.title);
-
+            const blocks = crawl.structuredBlocks.length > 0
+              ? crawl.structuredBlocks
+              : extractStructuredArticleBlocks(item.description, source.name, item.link, item.title);
+            if (blocks.length > 0) {
+              const firstBlock = blocks[0];
+              const restBlocks = blocks.slice(1);
+              const fallbackLayman = `<p>This report from ${source.name} highlights developments that may affect citizens and stakeholders positively through improved awareness and policy action, or negatively if operational challenges and costs arise.</p>`;
+              finalContent = appendEditorialSections(firstBlock, restBlocks, fallbackLayman, item.link, source.name);
+              finalSummary = decodeAndCleanHtml(firstBlock).substring(0, 150) + "...";
               if (crawl.featuredImage) {
                 finalFeaturedImage = crawl.featuredImage;
               }
-              if (item.link && source.name) {
-                draftHtml += `
-<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p>
- Credit to our media partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
-</p>`;
-              }
-              finalContent = draftHtml;
-              finalSummary = crawl.fullText.substring(0, 150) + "...";
             }
           } catch (crawlErr) {
             // Keep default item.description
@@ -2076,28 +2406,22 @@ async function scrapeAndAutoProcess() {
         addLog("info", `Queue threshold exceeded, but loading full webpage content for manual review draft...`, "scraper");
         try {
           const crawl = await fetchFullPageAndImages(item.link, source.name);
-          if (crawl.fullText) {
-            let paragraphs = crawl.fullText.split("\n\n").map(p => p.trim()).filter(Boolean);
-            if (paragraphs.length <= 1) {
-              paragraphs = crawl.fullText.split("\n").map(p => p.trim()).filter(Boolean);
-            }
-            let draftHtml = paragraphs.map(p => `<p style='margin-bottom: 20px; line-height: 1.8; color: #334155; font-size: 16px;'>${p}</p>`).join("\n");
-
-            // Apply the cleaning!
-            draftHtml = cleanFirstParagraphsHtml(draftHtml, item.title);
-
+          if (crawl.fullText === "HTTP_404_ERROR") {
+            addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
+            continue;
+          }
+          const blocks = crawl.structuredBlocks.length > 0
+            ? crawl.structuredBlocks
+            : extractStructuredArticleBlocks(item.description, source.name, item.link, item.title);
+          if (blocks.length > 0) {
+            const firstBlock = blocks[0];
+            const restBlocks = blocks.slice(1);
+            const fallbackLayman = `<p>This report from ${source.name} highlights developments that may affect citizens and stakeholders positively through improved awareness and policy action, or negatively if operational challenges and costs arise.</p>`;
+            finalContent = appendEditorialSections(firstBlock, restBlocks, fallbackLayman, item.link, source.name);
+            finalSummary = decodeAndCleanHtml(firstBlock).substring(0, 150) + "...";
             if (crawl.featuredImage) {
               finalFeaturedImage = crawl.featuredImage;
             }
-            if (item.link && source.name) {
-              draftHtml += `
-<hr style="margin-top: 35px; border: 0; border-top: 1px solid #e2e8f0;" />
-<p>
- Credit to our Media Partner <a href="${item.link}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${source.name} </a>.
-</p>`;
-            }
-            finalContent = draftHtml;
-            finalSummary = crawl.fullText.substring(0, 150) + "...";
           }
         } catch (crawlErr) {
           // Keep default item.description
@@ -2420,6 +2744,27 @@ app.post("/api/sources", (req, res) => {
   res.json({ status: "ok", sources: db.sources });
 });
 
+app.put("/api/sources/:id", (req, res) => {
+  const db = loadDb();
+  const { id } = req.params;
+  const { name, feedUrl, url, type, enabled } = req.body;
+  const idx = db.sources.findIndex((s: any) => s.id === id);
+  if (idx === -1) {
+    return res.status(404).json({ error: "Source outlet not found" });
+  }
+  db.sources[idx] = {
+    ...db.sources[idx],
+    ...(name !== undefined ? { name: String(name).trim() } : {}),
+    ...(feedUrl !== undefined ? { feedUrl: String(feedUrl).trim() } : {}),
+    ...(url !== undefined ? { url: String(url).trim() } : (feedUrl !== undefined ? { url: String(feedUrl).trim() } : {})),
+    ...(type !== undefined ? { type: String(type).trim() } : {}),
+    ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {})
+  };
+  saveDb(db);
+  addLog("success", `Updated monitored outlet "${db.sources[idx].name}".`, "system");
+  res.json({ status: "ok", source: db.sources[idx], sources: db.sources });
+});
+
 app.delete("/api/sources/:id", (req, res) => {
   const db = loadDb();
   const id = req.params.id;
@@ -2594,8 +2939,8 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
   saveDb(db);
 
   try {
-    // 1. Editorial Summarization if not enriched yet (Lazy summarizes via Gemini)
-    if (!article.isEnriched && (!article.content || !article.content.includes("<p align="))) {
+    // 1. Editorial Curation if not enriched yet or missing What You Should Know section
+    if (!article.isEnriched || !article.content || !article.content.includes("What You Should Know")) {
       const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
       article.title = aiEdit.title;
       article.summary = aiEdit.summary;
