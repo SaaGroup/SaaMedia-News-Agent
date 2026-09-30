@@ -3,7 +3,7 @@
   "sources": [
     {
       "id": "dailytrust-home",
-      "name": "DailyTrust Home",
+      "name": "DailyTrust",
       "url": "https://dailytrust.com/",
       "type": "National",
       "feedUrl": "https://dailytrust.com/",
@@ -11,10 +11,18 @@
     },
     {
       "id": "tvcnews-home",
-      "name": "TVC News Home",
+      "name": "TVC News",
       "url": "https://www.tvcnews.tv/",
       "type": "Politics",
       "feedUrl": "https://www.tvcnews.tv/",
+      "enabled": true
+    },
+    {
+      "id": "arisetv-home",
+      "name": "AriseTV",
+      "url": "https://arise.tv/",
+      "type": "National",
+      "feedUrl": "https://arise.tv/",
       "enabled": true
     }
   ],
@@ -30,42 +38,55 @@
     "whatsappApiKey": "",
     "schedulerIntervalMins": 180,
     "schedulerEnabled": true,
-    "apiKeyOverride": ""
+    "apiKeyOverride": "",
+    "telegramToken": "",
+    "telegramChatId": "",
+    "telegramEnabled": false,
+    "facebookPageId": "",
+    "facebookPageAccessToken": "",
+    "facebookEnabled": false
   },
   "logs": [
     {
-      "id": "kerym1t",
-      "timestamp": "2026-06-19T16:14:17.207Z",
+      "id": "78tx3hu",
+      "timestamp": "2026-09-30T10:07:51.317Z",
       "level": "info",
       "message": "System Scheduler initiated! Runs automatically every 180 minutes.",
       "section": "system"
     },
     {
-      "id": "j8h7nzt",
-      "timestamp": "2026-06-18T16:36:40.483Z",
+      "id": "vhi2s2k",
+      "timestamp": "2026-09-30T09:30:30.447Z",
       "level": "info",
-      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "message": "System Scheduler initiated! Runs automatically every 180 minutes.",
       "section": "system"
     },
     {
-      "id": "a1jg2ar",
-      "timestamp": "2026-06-18T16:33:47.194Z",
-      "level": "info",
-      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "id": "21z2wug",
+      "timestamp": "2026-09-30T08:40:21.106Z",
+      "level": "success",
+      "message": "Updated monitored outlet \"TVC News\".",
       "section": "system"
     },
     {
-      "id": "ffwhkfy",
-      "timestamp": "2026-06-18T16:33:41.812Z",
-      "level": "info",
-      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "id": "0ls8paw",
+      "timestamp": "2026-09-30T08:40:03.637Z",
+      "level": "success",
+      "message": "Updated monitored outlet \"DailyTrust\".",
       "section": "system"
     },
     {
-      "id": "ed93has",
-      "timestamp": "2026-06-18T16:25:25.073Z",
+      "id": "o063cqy",
+      "timestamp": "2026-09-30T08:37:37.114Z",
       "level": "info",
-      "message": "System Scheduler initiated! Runs automatically every 60 minutes.",
+      "message": "System Scheduler initiated! Runs automatically every 180 minutes.",
+      "section": "system"
+    },
+    {
+      "id": "juq1adk",
+      "timestamp": "2026-09-30T08:18:21.472Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 180 minutes.",
       "section": "system"
     }
   ]

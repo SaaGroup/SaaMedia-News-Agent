@@ -226,8 +226,9 @@ const DB_PATH = path.join(process.cwd(), "db.json");
 
 // Define Default Values
 const DEFAULT_SOURCES: NewsSource[] = [
-  { id: "dailytrust-home", name: "DailyTrust Home", url: "https://dailytrust.com/", type: "National", feedUrl: "https://dailytrust.com/", enabled: true },
-  { id: "tvcnews-home", name: "TVC News Home", url: "https://www.tvcnews.tv/", type: "Politics", feedUrl: "https://www.tvcnews.tv/", enabled: true }
+  { id: "dailytrust-home", name: "DailyTrust", url: "https://dailytrust.com/", type: "National", feedUrl: "https://dailytrust.com/", enabled: true },
+  { id: "tvcnews-home", name: "TVC News", url: "https://www.tvcnews.tv/", type: "Politics", feedUrl: "https://www.tvcnews.tv/", enabled: true },
+  { id: "arisetv-home", name: "AriseTV", url: "https://arise.tv/", type: "National", feedUrl: "https://arise.tv/", enabled: true }
 ];
 
 const DEFAULT_CONFIG: SystemConfig = {
@@ -1174,8 +1175,33 @@ function cleanScrapedArticleText(rawText: string, sourceName: string): string {
   const isTheNation = lowerSource.includes("nation") || rawText.includes("thenationonlineng.net");
   const isKogiReports = lowerSource.includes("kogi") || rawText.includes("kogireports.com");
   const isDailyTrustOrTvc = lowerSource.includes("dailytrust") || lowerSource.includes("daily trust") || lowerSource.includes("tvc");
+  const isAriseTv = lowerSource.includes("arise") || rawText.toLowerCase().includes("arise.tv");
 
   let processedText = rawText;
+
+  // 0. For AriseTV (and any source with "Follow us on:"): Truncate at "Follow us on:" and remove the preceding author name line
+  const followUsIdx = processedText.search(/\bfollow\s+us\s+on\s*:/i);
+  if (followUsIdx !== -1) {
+    processedText = processedText.substring(0, followUsIdx).trim();
+    // Remove the author name line that immediately precedes "Follow us on:"
+    const linesBeforeFollow = processedText.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    if (linesBeforeFollow.length > 1) {
+      const lastLine = linesBeforeFollow[linesBeforeFollow.length - 1];
+      if (lastLine.length < 100 && lastLine.split(/\s+/).length <= 10) {
+        linesBeforeFollow.pop();
+        processedText = linesBeforeFollow.join("\n\n").trim();
+      }
+    }
+  } else if (isAriseTv) {
+    const ariseLines = processedText.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    if (ariseLines.length > 1) {
+      const lastLine = ariseLines[ariseLines.length - 1];
+      if (lastLine.length < 80 && lastLine.split(/\s+/).length <= 8 && !/[.!?]$/.test(lastLine)) {
+        ariseLines.pop();
+        processedText = ariseLines.join("\n\n").trim();
+      }
+    }
+  }
 
   // 1. For "The Nation": Truncate as soon as "TAGS:" or "TAGS" block or promotional spam is reached
   const tagsIdx = processedText.search(/\bTAGS\s*:/i);
@@ -1496,10 +1522,12 @@ function shouldExcludeBlockText(plainText: string, sourceName: string): boolean 
     return true;
   }
 
-  // The Nation / general spam & channel promotions
+  // The Nation / AriseTV / general spam & channel promotions
   if (
     /^\s*tags\s*:/i.test(p) ||
     lowerP === "tags" ||
+    /^\s*follow\s+us\s+on\s*:?/i.test(p) ||
+    lowerP.includes("follow us on:") ||
     lowerP.includes("abuja doctor reveals a unique way") ||
     lowerP.includes("congratulations, we just got you a job") ||
     lowerP.includes("follow the nation newspaper on whatsapp") ||
@@ -1610,6 +1638,26 @@ function extractStructuredArticleBlocks(
     .replace(/<h3[^>]*>\s*What You Should Know\s*<\/h3>[\s\S]*$/i, "")
     .replace(/<hr[^>]*>\s*<p[^>]*>\s*(?:News\s+)?Credit to our media partner[\s\S]*$/i, "");
 
+  const isAriseTv =
+    (sourceName || "").toLowerCase().includes("arise") ||
+    (baseUrl || "").toLowerCase().includes("arise.tv") ||
+    html.toLowerCase().includes("arise.tv");
+
+  // AriseTV & general "Follow us on:" cutoff: remove both the preceding author name and "Follow us on:" (plus anything after it)
+  let hadFollowUsCutoff = false;
+  // 1. If author name is on a <br> or newline right before "Follow us on:" inside the same block
+  if (/\bfollow\s+us\s+on\s*:/i.test(html)) {
+    hadFollowUsCutoff = true;
+    html = html.replace(/(?:<br\s*\/?>|\n)\s*(?:<[^>]+>\s*)*[^<\n]{2,100}?\s*(?:<br\s*\/?>|\n|\s|<\/?\w+[^>]*>)*\bfollow\s+us\s+on\s*:[\s\S]*$/i, "");
+    // 2. If author name is in its own <p>/<div>/<strong> block immediately before "Follow us on:"
+    html = html.replace(/<(p|div|h[3456]|span)\b[^>]*>\s*(?:<[^>]+>\s*)*[^<]{2,100}?(?:<\/[^>]+>\s*)*<\/\1>\s*(?:<[^>]+>\s*)*\bfollow\s+us\s+on\s*:[\s\S]*$/i, "");
+    // 3. Truncate any remaining "Follow us on:" and everything after it
+    const followIdx = html.search(/\bfollow\s+us\s+on\s*:/i);
+    if (followIdx !== -1) {
+      html = html.substring(0, followIdx);
+    }
+  }
+
   // Source-level cutoff markers on raw HTML before block parsing
   const cutoffPatterns: RegExp[] = [
     /<[^>]+>\s*TAGS\s*:\s*<\/[^>]+>/i,
@@ -1647,6 +1695,18 @@ function extractStructuredArticleBlocks(
       const plainText = decodeAndCleanHtml(innerRaw).trim();
 
       if (!plainText) continue;
+
+      // If a block hits "Follow us on:", remove the preceding author block (if short) and stop
+      if (/^\s*follow\s+us\s+on\s*:?/i.test(plainText) || plainText.toLowerCase().includes("follow us on:")) {
+        if (blocks.length > 0) {
+          const prevPlain = decodeAndCleanHtml(blocks[blocks.length - 1]).trim();
+          if (prevPlain.length < 100 && prevPlain.split(/\s+/).length <= 10) {
+            blocks.pop();
+          }
+        }
+        break;
+      }
+
       if (shouldExcludeBlockText(plainText, sourceName)) continue;
 
       if (tag === "ul" || tag === "ol") {
@@ -1738,6 +1798,32 @@ function extractStructuredArticleBlocks(
       blocks.shift();
     } else {
       break;
+    }
+  }
+
+  // Final cleanup at the end of blocks for AriseTV or any article that had a "Follow us on:" cutoff:
+  // Ensure the author name preceding "Follow us on:" (whether in its own block or after a <br> at the end of the last block) is removed.
+  if (blocks.length > 0 && (hadFollowUsCutoff || isAriseTv)) {
+    // 1. If the last block has a <br> followed by a short author name line at the very end, strip that trailing line
+    blocks[blocks.length - 1] = blocks[blocks.length - 1].replace(
+      /(?:<br\s*\/?>|\n)\s*(?:<[^>]+>\s*)*[A-Z][a-zA-Z.'’-]+(?:\s+[A-Z][a-zA-Z.'’-]+){0,5}\s*(?:<\/[^>]+>\s*)*<\/p>$/,
+      "</p>"
+    );
+
+    // 2. If the last block itself is just the author's name (short line without terminal sentence punctuation or matching a name pattern), remove it
+    while (blocks.length > 1) {
+      const lastPlain = decodeAndCleanHtml(blocks[blocks.length - 1]).trim();
+      const words = lastPlain.split(/\s+/).filter(Boolean);
+      const isShortSignOff =
+        lastPlain.length <= 75 &&
+        words.length >= 1 &&
+        words.length <= 7 &&
+        (!/[.!?]$/.test(lastPlain) || /^[A-Z][a-zA-Z.'’-]+(?:\s+[A-Z][a-zA-Z.'’-]+){1,4}$/.test(lastPlain));
+      if (isShortSignOff || /^\s*follow\s+us\s+on\s*:?/i.test(lastPlain)) {
+        blocks.pop();
+      } else {
+        break;
+      }
     }
   }
 
