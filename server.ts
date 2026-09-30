@@ -508,29 +508,32 @@ async function wordpressPublishXmlRpc(config: SystemConfig, title: string, htmlC
   }
 
   const resText = await response.text();
+
+  // Check for XML-RPC faults FIRST so faultCode <int>403</int> is never mistaken for a Post ID
+  const faultMatch = resText.match(/<name>\s*faultString\s*<\/name>\s*<value>\s*(?:<string>)?([\s\S]*?)(?:<\/string>)?\s*<\/value>/i);
+  if (faultMatch && faultMatch[1]) {
+    throw new Error(`WordPress XML-RPC Fault: ${faultMatch[1].trim()}`);
+  }
+  if (resText.includes("<fault>")) {
+    throw new Error(`WordPress XML-RPC Fault returned by server.`);
+  }
   
-  // Search for the returned integer ID inside XML, usually <value><string>POST_ID</string></value> or <value><int>POST_ID</int></value>
-  const intMatch = resText.match(/<value><int>(\d+)<\/int><\/value>/);
+  // Search for the returned integer ID inside XML <params>, usually <value><string>POST_ID</string></value> or <value><int>POST_ID</int></value>
+  const intMatch = resText.match(/<params>[\s\S]*?<value>\s*<int>(\d+)<\/int>\s*<\/value>/i) || resText.match(/<value><int>(\d+)<\/int><\/value>/);
   if (intMatch && intMatch[1]) {
     return intMatch[1];
   }
   
-  const stringMatch = resText.match(/<value><string>(\d+)<\/string><\/value>/);
+  const stringMatch = resText.match(/<params>[\s\S]*?<value>\s*<string>(\d+)<\/string>\s*<\/value>/i) || resText.match(/<value><string>(\d+)<\/string><\/value>/);
   if (stringMatch && stringMatch[1]) {
     return stringMatch[1];
   }
 
-  // Check for XML-RPC faults
-  const faultMatch = resText.match(/<member><name>faultString<\/name><value><string>([\s\S]*?)<\/string><\/value><\/member>/);
-  if (faultMatch && faultMatch[1]) {
-    throw new Error(`WordPress XML-RPC Fault: ${faultMatch[1]}`);
-  }
-
-  return "success_xmlrpc";
+  throw new Error(`Unexpected WordPress XML-RPC response format.`);
 }
 
 // Upload image helper using WordPress REST API Media Endpoint
-async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string, filename: string): Promise<number | null> {
+async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string, filename: string, usernameOverride?: string): Promise<number | null> {
   try {
     const response = await fetch(imageUrl, {
       signal: AbortSignal.timeout(10000)
@@ -543,7 +546,9 @@ async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string
     const buffer = Buffer.from(arrayBuffer);
 
     const uploadUrl = `${config.wordpressUrl.replace(/\/$/, "")}/wp-json/wp/v2/media`;
-    const credentials = Buffer.from(`${config.wordpressUsername}:${config.wordpressPassword}`).toString("base64");
+    const activeUser = (usernameOverride || config.wordpressUsername || "admin").trim();
+    const activePass = (config.wordpressPassword || "").trim();
+    const credentials = Buffer.from(`${activeUser}:${activePass}`).toString("base64");
 
     const wpRes = await fetch(uploadUrl, {
       method: "POST",
@@ -573,47 +578,83 @@ async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string
 
 // WordPress REST API Client Implementation
 async function wordpressPublishRest(config: SystemConfig, title: string, htmlContent: string, categoryName: string, featuredImageUrl: string | null = null): Promise<string> {
-  const apiUrl = `${config.wordpressUrl.replace(/\/$/, "")}/wp-json/wp/v2/posts`;
-  const credentials = Buffer.from(`${config.wordpressUsername}:${config.wordpressPassword}`).toString("base64");
+  const baseUrl = (config.wordpressUrl || "https://saamedia.com.ng").replace(/\/$/, "");
+  const apiUrl = `${baseUrl}/wp-json/wp/v2/posts`;
+  const rawPass = (config.wordpressPassword || "").trim();
 
-  let featuredMediaId: number | null = null;
-  if (featuredImageUrl) {
-    featuredMediaId = await uploadMediaToWordPressRest(config, featuredImageUrl, `news-featured-${Date.now()}.jpg`);
+  if (!rawPass) {
+    throw new Error("WordPress Application Password is empty. Please enter your WordPress Application Password in 'Gateways & Secrets' and click Save.");
   }
 
-  const postPayload: any = {
-    title: title,
-    content: htmlContent,
-    status: "publish"
-  };
+  const primaryUser = (config.wordpressUsername || "admin").trim();
+  const candidateUsers = Array.from(new Set([
+    primaryUser,
+    "saamedia-info",
+    "SAAMEDIA NEWS",
+    "saamedia-ai",
+    "SAAMEDIA.AI",
+    "info@saamedia.com.ng",
+    "admin"
+  ]));
 
-  if (featuredMediaId) {
-    postPayload.featured_media = featuredMediaId;
-  }
+  let lastErrorMsg = "";
 
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Basic ${credentials}`,
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify(postPayload)
-  });
+  for (const candidateUser of candidateUsers) {
+    const credentials = Buffer.from(`${candidateUser}:${rawPass}`).toString("base64");
 
-  if (!response.ok) {
+    let featuredMediaId: number | null = null;
+    if (featuredImageUrl) {
+      featuredMediaId = await uploadMediaToWordPressRest(config, featuredImageUrl, `news-featured-${Date.now()}.jpg`, candidateUser);
+    }
+
+    const postPayload: any = {
+      title: title,
+      content: htmlContent,
+      status: "publish"
+    };
+
+    if (featuredMediaId) {
+      postPayload.featured_media = featuredMediaId;
+    }
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Basic ${credentials}`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify(postPayload)
+    });
+
+    if (response.ok) {
+      if (candidateUser !== primaryUser) {
+        const db = loadDb();
+        db.config.wordpressUsername = candidateUser;
+        saveGatewayConfigFile(db.config);
+        saveDb(db);
+        addLog("info", `Auto-detected matching WordPress username "${candidateUser}" and updated configuration.`, "publisher");
+      }
+      const data: any = await response.json();
+      return data.id ? String(data.id) : "success_rest";
+    }
+
     const errorBody = await response.text();
     let message = `HTTP Status ${response.status}`;
     try {
       const errJson = JSON.parse(errorBody);
       if (errJson.message) message = errJson.message;
     } catch (_) {}
-    throw new Error(`WordPress REST Error: ${message}`);
+    lastErrorMsg = `WordPress REST Error (${response.status}): ${message}`;
+
+    // Only try alternate usernames if 401/403 authentication failure occurred
+    if (response.status !== 401 && response.status !== 403) {
+      break;
+    }
   }
 
-  const data: any = await response.json();
-  return data.id ? String(data.id) : "success_rest";
+  throw new Error(lastErrorMsg || "WordPress REST authentication failed.");
 }
 
 // Telegram Notifier Implementation
@@ -2811,6 +2852,10 @@ async function publishArticleToWordPress(
   category: string,
   featuredImage: string | null | undefined
 ): Promise<string> {
+  if (!config.wordpressPassword || !config.wordpressPassword.trim()) {
+    throw new Error("WordPress Application Password is missing. Please enter your WordPress Application Password in 'Gateways & Secrets' and click Save.");
+  }
+
   if (config.wordpressMode === "xmlrpc") {
     try {
       return await wordpressPublishXmlRpc(config, title, content, category);
@@ -2823,7 +2868,12 @@ async function publishArticleToWordPress(
       return await wordpressPublishRest(config, title, content, category, featuredImage);
     } catch (restErr: any) {
       addLog("warn", `REST API publish failed (${restErr.message}). Attempting XML-RPC fallback...`, "publisher");
-      return await wordpressPublishXmlRpc(config, title, content, category);
+      try {
+        return await wordpressPublishXmlRpc(config, title, content, category);
+      } catch (_xmlErr: any) {
+        // Surface the primary REST API error rather than a generic LiteSpeed XML-RPC 403 block
+        throw restErr;
+      }
     }
   }
 }
@@ -3320,50 +3370,79 @@ app.post("/api/articles/:id/enrich", async (req, res) => {
   }
 });
 
-// Edit & Approve Draft Article before publishing
-app.post("/api/articles/:id/edit-approve", (req, res) => {
+// Shared helper for manual approval & immediate WordPress publishing
+async function executeManualApproveAndPublish(
+  id: string,
+  edits?: { title?: string; content?: string; summary?: string; category?: string },
+  configOverride?: Partial<SystemConfig>,
+  publishToWordPress: boolean = true
+) {
   const db = loadDb();
-  const { id } = req.params;
-  const { title, content, summary, category } = req.body;
 
+  // If the client sent non-empty gateway credentials in configOverride, merge and persist them automatically
+  if (configOverride && typeof configOverride === "object") {
+    let configUpdated = false;
+    const secretKeys: (keyof SystemConfig)[] = [
+      "wordpressUrl",
+      "wordpressUsername",
+      "wordpressPassword",
+      "wordpressMode",
+      "whatsappRecipient",
+      "whatsappGateway",
+      "whatsappSenderNumber",
+      "whatsappAccountSid",
+      "whatsappApiKey",
+      "apiKeyOverride",
+      "telegramToken",
+      "telegramChatId",
+      "facebookPageId",
+      "facebookPageAccessToken"
+    ];
+    for (const k of secretKeys) {
+      const incomingVal = configOverride[k];
+      if (incomingVal !== undefined && String(incomingVal).trim() !== "" && db.config[k] !== incomingVal) {
+        (db.config as any)[k] = incomingVal;
+        configUpdated = true;
+      }
+    }
+    if (typeof configOverride.telegramEnabled === "boolean") db.config.telegramEnabled = configOverride.telegramEnabled;
+    if (typeof configOverride.facebookEnabled === "boolean") db.config.facebookEnabled = configOverride.facebookEnabled;
+    if (configUpdated) {
+      saveGatewayConfigFile(db.config);
+      saveDb(db);
+    }
+  }
+
+  const config = db.config;
   const idx = db.articles.findIndex((a: Article) => a.id === id);
   if (idx === -1) {
-    return res.status(404).json({ error: "Article not found" });
+    return { notFound: true as const };
   }
 
-  db.articles[idx].title = title;
-  db.articles[idx].content = content;
-  db.articles[idx].summary = summary;
-  db.articles[idx].category = category;
-  db.articles[idx].status = "approved";
-
-  saveDb(db);
-  addLog("success", `Article state updated & approved by editorial review: "${title}"`, "summarizer");
-  res.json({ status: "ok", article: db.articles[idx] });
-});
-
-// Single force publishing trigger
-app.post("/api/articles/:id/force-publish", async (req, res) => {
-  const { id } = req.params;
-  const db = loadDb();
-  const config = db.config;
-  const article = db.articles.find((a: Article) => a.id === id);
-
-  if (!article) {
-    return res.status(404).json({ error: "Article not found" });
+  const article = db.articles[idx];
+  if (edits) {
+    if (edits.title !== undefined && edits.title.trim()) article.title = edits.title.trim();
+    if (edits.content !== undefined && edits.content.trim()) article.content = edits.content;
+    if (edits.summary !== undefined) article.summary = edits.summary;
+    if (edits.category !== undefined && edits.category.trim()) article.category = edits.category;
   }
 
-  article.status = "publishing";
+  article.status = publishToWordPress ? "publishing" : "approved";
   saveDb(db);
+
+  if (!publishToWordPress) {
+    addLog("success", `Article draft saved & approved by editorial review: "${article.title}"`, "summarizer");
+    return { notFound: false as const, article };
+  }
 
   try {
     // 1. Editorial Curation if not enriched yet or missing What You Should Know section
     if (!article.isEnriched || !article.content || !article.content.includes("What You Should Know")) {
       const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
-      article.title = aiEdit.title;
-      article.summary = aiEdit.summary;
-      article.category = aiEdit.category;
-      article.content = aiEdit.contentHtml;
+      if (!edits?.title) article.title = aiEdit.title;
+      if (!edits?.summary) article.summary = aiEdit.summary;
+      if (!edits?.category) article.category = aiEdit.category;
+      if (!edits?.content) article.content = aiEdit.contentHtml;
       article.featuredImage = aiEdit.featuredImage;
       article.isEnriched = true;
     }
@@ -3372,30 +3451,26 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     if (paragraphsCount < 2) {
       article.status = "failed";
       article.publishError = `Cannot Publish: Content has only ${paragraphsCount} paragraph(s) (minimum is 2).`;
-      
       const finalDb = loadDb();
       const fIdx = finalDb.articles.findIndex((a: any) => a.id === id);
-      if (fIdx !== -1) {
-        finalDb.articles[fIdx] = article;
-      }
+      if (fIdx !== -1) finalDb.articles[fIdx] = article;
       saveDb(finalDb);
-      
       addLog("warn", `Manual Publish skipped for "${article.title}" - content has only ${paragraphsCount} paragraph(s) (minimum is 2).`, "publisher");
-      return res.status(400).json({ error: `Cannot publish: Content has only ${paragraphsCount} paragraph(s) (minimum 2 paragraphs required).` });
+      return { notFound: false as const, article, badRequestError: `Cannot publish: Content has only ${paragraphsCount} paragraph(s) (minimum 2 paragraphs required).` };
     }
 
-    addLog("info", `Force Publishing Article to WP: ${article.title}`, "publisher");
+    addLog("info", `Publishing Approved Article to WordPress (${config.wordpressUrl}): "${article.title}"`, "publisher");
 
-    // 2. Publish (with automatic REST <-> XML-RPC fallback)
+    // 2. Publish to WordPress
     const wpId = await publishArticleToWordPress(config, article.title, article.content, article.category, article.featuredImage);
 
     article.wordpressId = wpId;
     article.publishedAt = new Date().toISOString();
     article.status = "published";
     article.publishError = null;
-    addLog("success", `Article force-published to WordPress successfully! WP ID: ${wpId}`, "publisher");
+    addLog("success", `Article published to WordPress successfully! WP ID: ${wpId}`, "publisher");
 
-    // 3. WhatsApp and Telegram Alerts dispatch
+    // 3. WhatsApp, Telegram, and Facebook Alerts dispatch
     const cleanTitle = decodeAndCleanHtml(article.title);
     const rawParagraph = getFirstParagraph(article.content, article.summary);
     const cleanParagraph = truncateText(rawParagraph, 300);
@@ -3442,12 +3517,13 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
     }
 
   } catch (err: any) {
-    article.status = "failed";
+    // Keep article in "approved" state if credentials are missing so the user doesn't lose their approval
+    const isMissingPassword = /Application Password is (empty|missing)/i.test(err.message || "");
+    article.status = isMissingPassword ? "approved" : "failed";
     article.publishError = err.message;
     addLog("error", `WordPress publishing failed for "${article.title}": ${err.message}`, "publisher");
   }
 
-  // Reload current DB state and save
   const finalDb = loadDb();
   const fIdx = finalDb.articles.findIndex((a: any) => a.id === id);
   if (fIdx !== -1) {
@@ -3455,7 +3531,49 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
   }
   saveDb(finalDb);
 
-  res.json({ status: "finished", article });
+  return { notFound: false as const, article };
+}
+
+// Edit & Approve Draft Article (and immediately publish to WordPress unless saveOnly is true)
+app.post("/api/articles/:id/edit-approve", async (req, res) => {
+  const { id } = req.params;
+  const { title, content, summary, category, configOverride, saveOnly } = req.body || {};
+
+  const result = await executeManualApproveAndPublish(
+    id,
+    { title, content, summary, category },
+    configOverride,
+    !saveOnly
+  );
+
+  if (result.notFound) {
+    return res.status(404).json({ error: "Article not found" });
+  }
+  if (result.badRequestError) {
+    return res.status(400).json({ error: result.badRequestError, article: result.article });
+  }
+  res.json({ status: "ok", article: result.article });
+});
+
+// Single force publishing trigger (also saves any edits if passed)
+app.post("/api/articles/:id/force-publish", async (req, res) => {
+  const { id } = req.params;
+  const { title, content, summary, category, configOverride } = req.body || {};
+
+  const result = await executeManualApproveAndPublish(
+    id,
+    { title, content, summary, category },
+    configOverride,
+    true
+  );
+
+  if (result.notFound) {
+    return res.status(404).json({ error: "Article not found" });
+  }
+  if (result.badRequestError) {
+    return res.status(400).json({ error: result.badRequestError, article: result.article });
+  }
+  res.json({ status: "finished", article: result.article });
 });
 
 // Delete article from local list

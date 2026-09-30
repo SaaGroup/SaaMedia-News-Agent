@@ -528,9 +528,14 @@ export default function App() {
     }
   };
 
-  // Save and approve intermediate draft
-  const handleSaveApproveArticle = async () => {
+  // Save and approve intermediate draft (or publish immediately)
+  const handleSaveApproveArticle = async (publishNow: boolean = false) => {
     if (!editingArticle) return;
+    const activeCfg = localConfig || config;
+    if (publishNow) {
+      triggerAlert("info", "Approving draft and publishing live to WordPress...");
+      setLoading(true);
+    }
     try {
       const res = await fetch(`/api/articles/${editingArticle.id}/edit-approve`, {
         method: "POST",
@@ -539,19 +544,34 @@ export default function App() {
           title: editingArticle.title,
           content: editingArticle.content,
           summary: editingArticle.summary,
-          category: editingArticle.category
+          category: editingArticle.category,
+          configOverride: activeCfg,
+          saveOnly: !publishNow
         })
       });
 
-      if (res.ok) {
-        triggerAlert("success", "Draft approved and customized. Headed for publishing.");
-        setEditingArticle(null);
+      const body = await res.json().catch(() => ({}));
+      if (res.ok && body.article) {
+        if (body.article.status === "published") {
+          triggerAlert("success", `Approved & Published Live on WordPress! Post ID: ${body.article.wordpressId}`);
+          setEditingArticle(null);
+        } else if (publishNow && body.article.publishError) {
+          triggerAlert("error", body.article.publishError);
+          if (/Application Password is (empty|missing)/i.test(body.article.publishError)) {
+            setActiveTab("settings");
+          }
+        } else {
+          triggerAlert("success", "Draft edits saved & marked Editorial Approved.");
+          setEditingArticle(null);
+        }
         fetchData();
       } else {
-        triggerAlert("error", "Failed to approve current draft edits.");
+        triggerAlert("error", body.error || "Failed to approve current draft edits.");
       }
     } catch (e) {
       triggerAlert("error", "API offline or error while validating approval.");
+    } finally {
+      if (publishNow) setLoading(false);
     }
   };
 
@@ -577,26 +597,46 @@ export default function App() {
     }
   };
 
-  // Force Publish to WordPress Sandbox / Production Live
+  // Approve & Publish immediately to WordPress Live
   const handleForcePublish = async (id: string) => {
-    triggerAlert("info", "Contacting WordPress XML-RPC / REST Gateways...");
+    const activeCfg = localConfig || config;
+    const isEditingThis = editingArticle && editingArticle.id === id;
+    triggerAlert("info", "Approving & publishing article live to WordPress...");
     setLoading(true);
     try {
-      const res = await fetch(`/api/articles/${id}/force-publish`, { method: "POST" });
-      if (res.ok) {
-        const body = await res.json();
+      const res = await fetch(`/api/articles/${id}/force-publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(isEditingThis
+            ? {
+                title: editingArticle.title,
+                content: editingArticle.content,
+                summary: editingArticle.summary,
+                category: editingArticle.category
+              }
+            : {}),
+          configOverride: activeCfg
+        })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok && body.article) {
         if (body.article.status === "published") {
           triggerAlert("success", `Live on WordPress! Post ID: ${body.article.wordpressId}`);
+          if (isEditingThis) setEditingArticle(null);
         } else {
-          triggerAlert("error", `Scattered issue during WordPress push: ${body.article.publishError}`);
+          const errMsg = body.article.publishError || "WordPress publish failed.";
+          triggerAlert("error", errMsg);
+          if (/Application Password is (empty|missing)/i.test(errMsg)) {
+            setActiveTab("settings");
+          }
         }
         fetchData();
-        if (editingArticle?.id === id) setEditingArticle(null);
       } else {
-        triggerAlert("error", "Publish endpoint returned server error.");
+        triggerAlert("error", body.error || "Publish endpoint returned server error.");
       }
     } catch (e) {
-      triggerAlert("error", "Publish error: Server timeout or XML-RPC blocked.");
+      triggerAlert("error", "Publish error: Server timeout or connection issue.");
     } finally {
       setLoading(false);
     }
@@ -1222,18 +1262,18 @@ export default function App() {
                         <div className="flex gap-3">
                           <button
                             type="button"
-                            onClick={handleSaveApproveArticle}
+                            onClick={() => handleSaveApproveArticle(false)}
                             className="flex items-center gap-1.5 px-4 py-2 border border-slate-700 text-slate-300 hover:bg-[#1e2c47] rounded-xl text-xs font-semibold transition-colors shadow-sm cursor-pointer"
                           >
-                            <Check className="h-4 w-4 text-[#008751]" /> Save Review Draft
+                            <Check className="h-4 w-4 text-[#008751]" /> Save Draft Edits
                           </button>
                           
                           <button
                             type="button"
-                            onClick={() => handleForcePublish(editingArticle.id)}
+                            onClick={() => handleSaveApproveArticle(true)}
                             className="flex items-center gap-1.5 px-5 py-2 bg-[#008751] hover:bg-green-650 text-white rounded-xl text-xs font-semibold transition-colors shadow cursor-pointer"
                           >
-                            <Send className="h-4 w-4" /> Approve & Send Live
+                            <Send className="h-4 w-4" /> Approve & Publish Live
                           </button>
                         </div>
                       </div>
@@ -1345,7 +1385,7 @@ export default function App() {
                                 {article.title || article.originalTitle}
                               </h3>
 
-                              {article.status === "failed" && article.publishError && (
+                              {(article.status === "failed" || article.status === "approved") && article.publishError && (
                                 <p className="text-xs text-rose-350 bg-rose-950/40 p-2.5 rounded border border-rose-900/40 font-mono break-all">
                                   System Error: {article.publishError}
                                 </p>
@@ -1357,31 +1397,33 @@ export default function App() {
                             </div>
                           </div>
 
-                          <div className="flex sm:flex-col items-center justify-end gap-2 shrink-0">
+                          <div className="flex sm:flex-col items-end justify-end gap-2 shrink-0">
                             
                             <button
-                              onClick={() => setEditingArticle(article)}
-                              title="Tweak and structure AI Draft"
-                              className="p-2 border border-slate-700 hover:bg-[#1e2c47] hover:text-green-400 text-slate-400 rounded-xl transition-colors bg-[#0B0F1A] shadow-sm cursor-pointer"
-                            >
-                              <Edit3 className="h-4 w-4" />
-                            </button>
-
-                            <button
                               onClick={() => handleForcePublish(article.id)}
-                              title="Force immediate publish"
-                              className="p-2 border border-green-900/60 hover:bg-green-950/45 hover:text-green-300 text-green-400 rounded-xl transition-colors bg-[#0B0F1A] shadow-sm cursor-pointer"
+                              title="Approve and immediately publish live to WordPress"
+                              className="flex items-center gap-1.5 px-3 py-2 border border-green-700/70 bg-[#008751] hover:bg-green-600 text-white rounded-xl text-xs font-semibold transition-colors shadow-sm cursor-pointer"
                             >
-                              <Send className="h-4 w-4" />
+                              <Send className="h-3.5 w-3.5" /> Approve & Publish
                             </button>
 
-                            <button
-                              onClick={() => handleDeleteArticle(article.id)}
-                              title="Discard"
-                              className="p-2 border border-slate-705 hover:bg-rose-950/40 hover:text-rose-400 text-slate-500 rounded-xl transition-colors bg-[#0B0F1A] shadow-sm cursor-pointer"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setEditingArticle(article)}
+                                title="Review & Edit Curated Draft"
+                                className="p-2 border border-slate-700 hover:bg-[#1e2c47] hover:text-green-400 text-slate-400 rounded-xl transition-colors bg-[#0B0F1A] shadow-sm cursor-pointer"
+                              >
+                                <Edit3 className="h-4 w-4" />
+                              </button>
+
+                              <button
+                                onClick={() => handleDeleteArticle(article.id)}
+                                title="Discard"
+                                className="p-2 border border-slate-705 hover:bg-rose-950/40 hover:text-rose-400 text-slate-500 rounded-xl transition-colors bg-[#0B0F1A] shadow-sm cursor-pointer"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
 
                           </div>
                         </div>
