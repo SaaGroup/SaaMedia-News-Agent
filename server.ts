@@ -9,7 +9,26 @@ import QRCode from "qrcode";
 import pino from "pino";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+
+// Helper to enforce strict timeouts on promises (such as Gemini SDK calls) so background pipelines never hang on Render
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
 
 // Prevent potential process crashes from background library micro-tasks (like Baileys network disconnects)
 process.on("unhandledRejection", (reason, promise) => {
@@ -388,12 +407,54 @@ function loadDb() {
   return freshDb;
 }
 
-function saveDb(db: any) {
+let dbFlushTimer: NodeJS.Timeout | null = null;
+let isFlushingDb = false;
+
+async function flushDbToDiskAsync(includeBackup: boolean = false) {
+  if (isFlushingDb || !cachedDb) return;
+  isFlushingDb = true;
+  try {
+    const serialized = JSON.stringify(cachedDb, null, 2);
+    const tmpPath = `${DB_PATH}.tmp`;
+    await fs.promises.writeFile(tmpPath, serialized, "utf-8");
+    await fs.promises.rename(tmpPath, DB_PATH);
+    if (includeBackup) {
+      const backupTmp = `${DB_BACKUP_PATH}.tmp`;
+      await fs.promises.writeFile(backupTmp, serialized, "utf-8");
+      await fs.promises.rename(backupTmp, DB_BACKUP_PATH);
+    }
+  } catch (e) {
+    try {
+      if (cachedDb) {
+        await fs.promises.writeFile(DB_PATH, JSON.stringify(cachedDb, null, 2), "utf-8");
+      }
+    } catch (innerErr) {
+      console.error("Async DB flush error:", innerErr);
+    }
+  } finally {
+    isFlushingDb = false;
+  }
+}
+
+function scheduleDbFlush(includeBackup: boolean = false) {
+  if (dbFlushTimer) {
+    clearTimeout(dbFlushTimer);
+  }
+  dbFlushTimer = setTimeout(() => {
+    dbFlushTimer = null;
+    flushDbToDiskAsync(includeBackup);
+  }, includeBackup ? 150 : 1200);
+}
+
+function saveDb(db: any, isLogOnly: boolean = false) {
   try {
     if (!db) return;
+    // Cap stored articles at 100 to prevent unbounded memory/disk growth on Render Free 512MB instances
+    if (Array.isArray(db.articles) && db.articles.length > 100) {
+      db.articles = db.articles.slice(0, 100);
+    }
     cachedDb = db;
-    writeJsonAtomic(DB_PATH, db);
-    writeJsonAtomic(DB_BACKUP_PATH, db);
+    scheduleDbFlush(!isLogOnly);
   } catch (e) {
     console.error("Failed to save database file...", e);
   }
@@ -423,11 +484,11 @@ function addLog(level: "info" | "warn" | "error" | "success", message: string, s
     section
   };
   db.logs.unshift(log);
-  // Cap logs at 200 items to preserve speed
-  if (db.logs.length > 200) {
-    db.logs = db.logs.slice(0, 200);
+  // Cap logs at 150 items to preserve memory & speed on Render Free tier
+  if (db.logs.length > 150) {
+    db.logs = db.logs.slice(0, 150);
   }
-  saveDb(db);
+  saveDb(db, true);
   console.log(`[${section.toUpperCase()} - ${level.toUpperCase()}] ${message}`);
 }
 
@@ -500,7 +561,8 @@ async function wordpressPublishXmlRpc(config: SystemConfig, title: string, htmlC
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
       "Accept": "text/xml, application/xml, */*"
     },
-    body: xmlPayload
+    body: xmlPayload,
+    signal: AbortSignal.timeout(20000)
   });
 
   if (!response.ok) {
@@ -532,17 +594,31 @@ async function wordpressPublishXmlRpc(config: SystemConfig, title: string, htmlC
   throw new Error(`Unexpected WordPress XML-RPC response format.`);
 }
 
-// Upload image helper using WordPress REST API Media Endpoint
+// Upload image helper using WordPress REST API Media Endpoint (memory-safe for Render 512MB instances)
 async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string, filename: string, usernameOverride?: string): Promise<number | null> {
   try {
     const response = await fetch(imageUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+      },
       signal: AbortSignal.timeout(10000)
     });
     if (!response.ok) {
       console.warn(`Failed to fetch original image for WP media library upload: ${imageUrl}`);
       return null;
     }
+
+    // Skip overly large images (> 4MB) to prevent Out-Of-Memory spikes on Render Free 512MB RAM instances
+    const contentLength = Number(response.headers.get("content-length") || "0");
+    if (contentLength > 4 * 1024 * 1024) {
+      console.warn(`Skipping WP media upload for oversized image (${Math.round(contentLength / 1024)}KB): ${imageUrl}`);
+      return null;
+    }
+
     const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > 4 * 1024 * 1024) {
+      return null;
+    }
     const buffer = Buffer.from(arrayBuffer);
 
     const uploadUrl = `${config.wordpressUrl.replace(/\/$/, "")}/wp-json/wp/v2/media`;
@@ -559,7 +635,8 @@ async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json"
       },
-      body: buffer
+      body: buffer,
+      signal: AbortSignal.timeout(20000)
     });
 
     if (wpRes.ok) {
@@ -599,11 +676,13 @@ async function wordpressPublishRest(config: SystemConfig, title: string, htmlCon
 
   let lastErrorMsg = "";
 
-  for (const candidateUser of candidateUsers) {
+  for (let i = 0; i < candidateUsers.length; i++) {
+    const candidateUser = candidateUsers[i];
     const credentials = Buffer.from(`${candidateUser}:${rawPass}`).toString("base64");
 
+    // Only upload media on the primary configured user initially so failed auth loops don't re-download images 7 times
     let featuredMediaId: number | null = null;
-    if (featuredImageUrl) {
+    if (featuredImageUrl && i === 0) {
       featuredMediaId = await uploadMediaToWordPressRest(config, featuredImageUrl, `news-featured-${Date.now()}.jpg`, candidateUser);
     }
 
@@ -625,19 +704,39 @@ async function wordpressPublishRest(config: SystemConfig, title: string, htmlCon
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "application/json"
       },
-      body: JSON.stringify(postPayload)
+      body: JSON.stringify(postPayload),
+      signal: AbortSignal.timeout(20000)
     });
 
     if (response.ok) {
+      const data: any = await response.json();
+      const postId = data.id ? String(data.id) : "success_rest";
+
       if (candidateUser !== primaryUser) {
         const db = loadDb();
         db.config.wordpressUsername = candidateUser;
         saveGatewayConfigFile(db.config);
         saveDb(db);
         addLog("info", `Auto-detected matching WordPress username "${candidateUser}" and updated configuration.`, "publisher");
+
+        // Now that we found the working fallback username, attach the featured image if present
+        if (featuredImageUrl && data.id) {
+          const fallbackMediaId = await uploadMediaToWordPressRest(config, featuredImageUrl, `news-featured-${Date.now()}.jpg`, candidateUser);
+          if (fallbackMediaId) {
+            await fetch(`${apiUrl}/${data.id}`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Basic ${credentials}`,
+                "User-Agent": "Mozilla/5.0"
+              },
+              body: JSON.stringify({ featured_media: fallbackMediaId }),
+              signal: AbortSignal.timeout(12000)
+            }).catch(() => {});
+          }
+        }
       }
-      const data: any = await response.json();
-      return data.id ? String(data.id) : "success_rest";
+      return postId;
     }
 
     const errorBody = await response.text();
@@ -1813,24 +1912,17 @@ function isInlineRelatedNewsBlock(innerRawHtml: string, plainText: string): bool
     return true;
   }
 
-  // 2. Check if the block contains an <a href="..."> tag and consists almost entirely of that hyperlink
-  // (e.g., <p><a href="...">Headline of another article</a></p> or <p><strong><a href="...">Headline</a></strong></p>)
-  if (/<a\b[^>]*href=/i.test(innerRawHtml)) {
-    const withoutFormattingTags = innerRawHtml
-      .replace(/<\/?(?:strong|b|em|i|span|u|small|br|p)\b[^>]*>/gi, "")
-      .trim();
+    // 2. Check if the block contains an <a href="..."> tag and consists almost entirely of that hyperlink
+    // (e.g., <p><a href="...">Headline of another article</a></p> or <p><strong><a href="...">Headline</a></strong></p>)
+    if (/<a\b[^>]*href=/i.test(innerRawHtml)) {
+      const textOutsideLinks = decodeAndCleanHtml(innerRawHtml.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")).trim();
+      const strippedPunct = textOutsideLinks.replace(/[\s•·›»>,;.\-–—:]/g, "");
 
-    // If the entire block after removing formatting wrappers is one or more <a>...</a> links (with optional bullet/colon/dash)
-    if (/^(?:[\s•·›»>:\-–—]*<a\b[^>]*>[\s\S]*?<\/a>[\s•·›»>,;.\-–—]*)+$/i.test(withoutFormattingTags)) {
-      return true;
+      // If the entire block outside of <a>...</a> tags has no words, or is just a tiny label (< 18 chars like "Read:", "News:", "Link:", etc.)
+      if (strippedPunct.length === 0 || (textOutsideLinks.length < 18 && p.length < 220)) {
+        return true;
+      }
     }
-
-    // Or if the text outside of <a>...</a> tags is just a tiny label (< 18 chars like "Read:", "News:", "Link:", etc.)
-    const textOutsideLinks = decodeAndCleanHtml(innerRawHtml.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")).trim();
-    if (textOutsideLinks.length < 18 && p.length < 220) {
-      return true;
-    }
-  }
 
   return false;
 }
@@ -1852,28 +1944,19 @@ function extractStructuredArticleBlocks(
     .replace(/<blockquote\b[^>]*class=["'][^"']*wp-embedded-content[^"']*["'][^>]*>[\s\S]*?<\/blockquote>/gi, "")
     .replace(/<iframe\b[^>]*class=["'][^"']*wp-embedded-content[^"']*["'][^>]*>[\s\S]*?<\/iframe>/gi, "")
     // Strip inline related news containers (divs, asides, sections, lists, paragraphs with related/read-also classes)
-    .replace(/<(div|aside|section|p|ul|ol|span|blockquote)\b[^>]*(?:class|id)=["'][^"']*(?:related|read-also|also-read|see-also|more-stories|recommended|yarpp|crp_related|jp-relatedposts|wp-embed|dont-miss|must-read|in-other-news|inline-related|post-nav)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi, "")
-    // Strip inline "Read Also / Related News" heading + immediately following <ul>/<ol> list of links
-    .replace(/<(?:h[2-6]|p|div|strong)\b[^>]*>\s*(?:<[^>]+>\s*)*(?:read\s+also|also\s+read|read\s+more|see\s+also|related\s+(?:news|stories|articles|posts)|more\s+stories|recommended(?:\s+for\s+you)?|don'?t\s+miss|must\s+read|icymi|in\s+other\s+news)\s*:?\s*(?:<\/[^>]+>\s*)*<\/(?:h[2-6]|p|div|strong)>\s*(?:<(?:ul|ol)\b[^>]*>[\s\S]*?<\/(?:ul|ol)>)?/gi, "");
+    .replace(/<(div|aside|section|p|ul|ol|span|blockquote)\b[^>]*(?:class|id)=["'][^"']*(?:related|read-also|also-read|see-also|more-stories|recommended|yarpp|crp_related|jp-relatedposts|wp-embed|dont-miss|must-read|in-other-news|inline-related|post-nav)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi, "");
 
   const isAriseTv =
     (sourceName || "").toLowerCase().includes("arise") ||
     (baseUrl || "").toLowerCase().includes("arise.tv") ||
     html.toLowerCase().includes("arise.tv");
 
-  // AriseTV & general "Follow us on:" cutoff: remove both the preceding author name and "Follow us on:" (plus anything after it)
+  // Linear-time O(N) "Follow us on:" cutoff (prevents catastrophic regex backtracking on AriseTV articles)
   let hadFollowUsCutoff = false;
-  // 1. If author name is on a <br> or newline right before "Follow us on:" inside the same block
-  if (/\bfollow\s+us\s+on\s*:/i.test(html)) {
+  const followIdx = html.search(/\bfollow\s+us\s+on\s*:/i);
+  if (followIdx !== -1) {
     hadFollowUsCutoff = true;
-    html = html.replace(/(?:<br\s*\/?>|\n)\s*(?:<[^>]+>\s*)*[^<\n]{2,100}?\s*(?:<br\s*\/?>|\n|\s|<\/?\w+[^>]*>)*\bfollow\s+us\s+on\s*:[\s\S]*$/i, "");
-    // 2. If author name is in its own <p>/<div>/<strong> block immediately before "Follow us on:"
-    html = html.replace(/<(p|div|h[3456]|span)\b[^>]*>\s*(?:<[^>]+>\s*)*[^<]{2,100}?(?:<\/[^>]+>\s*)*<\/\1>\s*(?:<[^>]+>\s*)*\bfollow\s+us\s+on\s*:[\s\S]*$/i, "");
-    // 3. Truncate any remaining "Follow us on:" and everything after it
-    const followIdx = html.search(/\bfollow\s+us\s+on\s*:/i);
-    if (followIdx !== -1) {
-      html = html.substring(0, followIdx);
-    }
+    html = html.substring(0, followIdx);
   }
 
   // Source-level cutoff markers on raw HTML before block parsing
@@ -2037,13 +2120,21 @@ function extractStructuredArticleBlocks(
   }
 
   // Final cleanup at the end of blocks for AriseTV or any article that had a "Follow us on:" cutoff:
-  // Ensure the author name preceding "Follow us on:" (whether in its own block or after a <br> at the end of the last block) is removed.
+  // Ensure the author name preceding "Follow us on:" (whether in its own block or after a <br> at the end of the last block) is removed in linear O(N) time.
   if (blocks.length > 0 && (hadFollowUsCutoff || isAriseTv)) {
-    // 1. If the last block has a <br> followed by a short author name line at the very end, strip that trailing line
-    blocks[blocks.length - 1] = blocks[blocks.length - 1].replace(
-      /(?:<br\s*\/?>|\n)\s*(?:<[^>]+>\s*)*[A-Z][a-zA-Z.'’-]+(?:\s+[A-Z][a-zA-Z.'’-]+){0,5}\s*(?:<\/[^>]+>\s*)*<\/p>$/,
-      "</p>"
-    );
+    const lastBlock = blocks[blocks.length - 1];
+    if (/<br\s*\/?>/i.test(lastBlock) && lastBlock.endsWith("</p>")) {
+      const innerLast = lastBlock.replace(/^<p\b[^>]*>/i, "").replace(/<\/p>$/i, "");
+      const brParts = innerLast.split(/<br\s*\/?>/i);
+      if (brParts.length > 1) {
+        const tailPlain = decodeAndCleanHtml(brParts[brParts.length - 1]).trim();
+        const tailWords = tailPlain.split(/\s+/).filter(Boolean);
+        if (tailPlain.length <= 75 && tailWords.length <= 7 && !/[.!?]$/.test(tailPlain)) {
+          brParts.pop();
+          blocks[blocks.length - 1] = `<p>${brParts.join("<br />").trim()}</p>`;
+        }
+      }
+    }
 
     // 2. If the last block itself is just the author's name (short line without terminal sentence punctuation or matching a name pattern), remove it
     while (blocks.length > 1) {
@@ -2333,7 +2424,11 @@ async function runAIElegancyAgent(
       ? structuredBlocks.filter((_, idx) => idx !== firstPIdx)
       : structuredBlocks.slice(1);
 
-    const fullPlainContext = structuredBlocks.map(b => decodeAndCleanHtml(b)).join("\n\n") || decodeAndCleanHtml(textToAnalyze);
+    const rawFullPlainContext = structuredBlocks.map(b => decodeAndCleanHtml(b)).join("\n\n") || decodeAndCleanHtml(textToAnalyze);
+    // Cap context sent to AI prompt at 6,000 chars to prevent memory spikes and slow responses on Render Free instances (while preserving 100% of verbatimRemainingBlocks in output)
+    const fullPlainContext = rawFullPlainContext.length > 6000
+      ? rawFullPlainContext.substring(0, 6000) + "..."
+      : rawFullPlainContext;
 
     const inputImagesText = imagesFound.length > 0
       ? `Extracted Available Image URLs from Source Webpage:\n${imagesFound.map((img, i) => `[Image ${i + 1}]: ${img}`).join("\n")}`
@@ -2390,45 +2485,53 @@ Respond strictly in valid JSON format matching this schema:
 
     let response;
     try {
-      response = await ai.models.generateContent({
-        model: "gemini-flash-lite-latest",
-        contents: userPrompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              summary: { type: Type.STRING },
-              category: { type: Type.STRING },
-              featuredImage: { type: Type.STRING, nullable: true },
-              paraphrasedFirstParagraph: { type: Type.STRING },
-              whatYouShouldKnowHtml: { type: Type.STRING }
-            },
-            required: ["title", "summary", "category", "paraphrasedFirstParagraph", "whatYouShouldKnowHtml"]
+      response = await withTimeout(
+        ai.models.generateContent({
+          model: "gemini-flash-lite-latest",
+          contents: userPrompt,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                summary: { type: Type.STRING },
+                category: { type: Type.STRING },
+                featuredImage: { type: Type.STRING, nullable: true },
+                paraphrasedFirstParagraph: { type: Type.STRING },
+                whatYouShouldKnowHtml: { type: Type.STRING }
+              },
+              required: ["title", "summary", "category", "paraphrasedFirstParagraph", "whatYouShouldKnowHtml"]
+            }
           }
-        }
-      });
+        }),
+        25000,
+        "Gemini Editorial Curation"
+      );
     } catch (_modelErr) {
-      response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: userPrompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              summary: { type: Type.STRING },
-              category: { type: Type.STRING },
-              featuredImage: { type: Type.STRING, nullable: true },
-              paraphrasedFirstParagraph: { type: Type.STRING },
-              whatYouShouldKnowHtml: { type: Type.STRING }
-            },
-            required: ["title", "summary", "category", "paraphrasedFirstParagraph", "whatYouShouldKnowHtml"]
+      response = await withTimeout(
+        ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: userPrompt,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                summary: { type: Type.STRING },
+                category: { type: Type.STRING },
+                featuredImage: { type: Type.STRING, nullable: true },
+                paraphrasedFirstParagraph: { type: Type.STRING },
+                whatYouShouldKnowHtml: { type: Type.STRING }
+              },
+              required: ["title", "summary", "category", "paraphrasedFirstParagraph", "whatYouShouldKnowHtml"]
+            }
           }
-        }
-      });
+        }),
+        25000,
+        "Gemini Editorial Curation Fallback"
+      );
     }
 
     let bodyText = response.text ? response.text.trim() : "";
@@ -2828,6 +2931,8 @@ async function scrapeAndAutoProcess() {
           saveDb(latestDb);
           newArticlesFoundCount++;
           addLog("success", `Added "${newArt.title}" to Editorial Queue (${latestDb.articles.filter((a: Article) => a.status === "scraped").length} in queue).`, "scraper");
+          // Brief pause to yield CPU & memory on Render Free instances between articles
+          await new Promise(resolve => setTimeout(resolve, 600));
         }
       }
     }
@@ -2994,12 +3099,13 @@ async function autoPublishFreshArticles() {
       currentDb.articles[idx] = article;
     }
     saveDb(currentDb);
+    // Short breathing pause between consecutive WordPress & social gateway posts to prevent rate-limiting or CPU freeze on Render Free tier
+    await new Promise(resolve => setTimeout(resolve, 800));
   }
 }
 
 // CRON INTERVAL ENGINE
 let schedulerIntervalId: NodeJS.Timeout | null = null;
-let initialBootScrapeTriggered = false;
 function startSchedulerLoop() {
   if (schedulerIntervalId) {
     clearInterval(schedulerIntervalId);
@@ -3015,42 +3121,6 @@ function startSchedulerLoop() {
       addLog("info", `Scheduled Automation Trigger fired.`, "system");
       await scrapeAndAutoProcess();
     }, intervalMins * 60 * 1000);
-
-    // If the Editorial Queue and Archive are currently empty on boot, automatically trigger an initial scrape so articles populate immediately
-    if (!initialBootScrapeTriggered) {
-      initialBootScrapeTriggered = true;
-      setTimeout(async () => {
-        try {
-          const bootDb = loadDb();
-          if (bootDb.articles.length === 0) {
-            await scrapeAndAutoProcess();
-          } else {
-            // Re-curate any existing articles that fell back with unparaphrased title (title === originalTitle)
-            const unparaphrased = bootDb.articles.filter((a: Article) => a.status === "scraped" && a.title === a.originalTitle);
-            for (const art of unparaphrased) {
-              try {
-                const aiEdit = await runAIElegancyAgent(art.originalTitle, art.content, art.url, art.source);
-                const freshDb = loadDb();
-                const idx = freshDb.articles.findIndex((x: Article) => x.id === art.id);
-                if (idx !== -1) {
-                  freshDb.articles[idx].title = aiEdit.title;
-                  freshDb.articles[idx].summary = aiEdit.summary;
-                  freshDb.articles[idx].category = aiEdit.category;
-                  freshDb.articles[idx].content = aiEdit.contentHtml;
-                  freshDb.articles[idx].featuredImage = aiEdit.featuredImage;
-                  freshDb.articles[idx].isEnriched = true;
-                  saveDb(freshDb);
-                }
-              } catch (_err) {
-                // ignore individual error
-              }
-            }
-          }
-        } catch (err) {
-          console.error("Initial boot scrape error:", err);
-        }
-      }, 1500);
-    }
   } else {
     addLog("info", "System Scheduler is currently disabled in system settings.", "system");
   }
