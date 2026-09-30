@@ -1,0 +1,20 @@
+{
+  "wordpressUrl": "https://saamedia.com.ng",
+  "wordpressUsername": "admin",
+  "wordpressPassword": "",
+  "wordpressMode": "rest",
+  "whatsappRecipient": "+2348000000000",
+  "whatsappGateway": "mock",
+  "whatsappSenderNumber": "+14155238886",
+  "whatsappAccountSid": "",
+  "whatsappApiKey": "",
+  "schedulerIntervalMins": 180,
+  "schedulerEnabled": true,
+  "apiKeyOverride": "",
+  "telegramToken": "",
+  "telegramChatId": "",
+  "telegramEnabled": false,
+  "facebookPageId": "",
+  "facebookPageAccessToken": "",
+  "facebookEnabled": false
+}

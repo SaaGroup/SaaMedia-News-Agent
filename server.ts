@@ -223,6 +223,8 @@ async function initializeWhatsAppWebClient() {
 
 // DB File Definition
 const DB_PATH = path.join(process.cwd(), "db.json");
+const DB_BACKUP_PATH = path.join(process.cwd(), "db.backup.json");
+const GATEWAY_CONFIG_PATH = path.join(process.cwd(), "gateway-config.json");
 
 // Define Default Values
 const DEFAULT_SOURCES: NewsSource[] = [
@@ -252,50 +254,146 @@ const DEFAULT_CONFIG: SystemConfig = {
   facebookEnabled: process.env.FACEBOOK_ENABLED === "true"
 };
 
-// Database Initialization Helper
-function loadDb() {
-  if (!fs.existsSync(DB_PATH)) {
-    const freshDb = {
-      articles: [] as Article[],
-      sources: DEFAULT_SOURCES,
-      config: DEFAULT_CONFIG,
-      logs: [] as SystemLog[]
-    };
-    fs.writeFileSync(DB_PATH, JSON.stringify(freshDb, null, 2));
-    return freshDb;
-  }
+function writeJsonAtomic(filePath: string, data: any) {
   try {
-    const data = fs.readFileSync(DB_PATH, "utf-8");
-    const parsed = JSON.parse(data);
-    // Backward compatibility check
-    if (!parsed.articles) parsed.articles = [];
-    if (!parsed.sources || parsed.sources.length === 0) {
-      parsed.sources = DEFAULT_SOURCES;
-      fs.writeFileSync(DB_PATH, JSON.stringify(parsed, null, 2));
-    }
-    if (!parsed.config) {
-      parsed.config = { ...DEFAULT_CONFIG };
-    } else {
-      parsed.config = { ...DEFAULT_CONFIG, ...parsed.config };
-    }
-    if (!parsed.logs) parsed.logs = [];
-    return parsed;
+    const tmpPath = `${filePath}.tmp`;
+    const serialized = JSON.stringify(data, null, 2);
+    fs.writeFileSync(tmpPath, serialized, "utf-8");
+    fs.renameSync(tmpPath, filePath);
   } catch (e) {
-    console.error("Failed to read database file, restoring defaults...", e);
-    const freshDb = {
-      articles: [] as Article[],
-      sources: DEFAULT_SOURCES,
-      config: DEFAULT_CONFIG,
-      logs: [] as SystemLog[]
-    };
-    fs.writeFileSync(DB_PATH, JSON.stringify(freshDb, null, 2));
-    return freshDb;
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    } catch (innerErr) {
+      console.error(`Failed to write ${filePath}:`, innerErr);
+    }
   }
+}
+
+function loadGatewayConfigFile(): Partial<SystemConfig> {
+  try {
+    if (fs.existsSync(GATEWAY_CONFIG_PATH)) {
+      const raw = fs.readFileSync(GATEWAY_CONFIG_PATH, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn("Could not read gateway-config.json:", e);
+  }
+  return {};
+}
+
+function saveGatewayConfigFile(config: SystemConfig) {
+  writeJsonAtomic(GATEWAY_CONFIG_PATH, config);
+}
+
+function mergeConfigWithSavedSecrets(baseConfig: Partial<SystemConfig> | undefined): SystemConfig {
+  const savedGateway = loadGatewayConfigFile();
+  const merged: SystemConfig = {
+    ...DEFAULT_CONFIG,
+    ...savedGateway,
+    ...(baseConfig || {})
+  };
+
+  // Ensure non-empty credentials from gateway-config.json or env are never accidentally overwritten by empty defaults
+  const secretKeys: (keyof SystemConfig)[] = [
+    "wordpressUrl",
+    "wordpressUsername",
+    "wordpressPassword",
+    "whatsappRecipient",
+    "whatsappSenderNumber",
+    "whatsappAccountSid",
+    "whatsappApiKey",
+    "apiKeyOverride",
+    "telegramToken",
+    "telegramChatId",
+    "facebookPageId",
+    "facebookPageAccessToken"
+  ];
+
+  for (const key of secretKeys) {
+    const currentVal = merged[key];
+    const savedVal = savedGateway[key];
+    const defaultVal = DEFAULT_CONFIG[key];
+    if ((!currentVal || String(currentVal).trim() === "") && savedVal && String(savedVal).trim() !== "") {
+      (merged as any)[key] = savedVal;
+    } else if ((!currentVal || String(currentVal).trim() === "") && defaultVal && String(defaultVal).trim() !== "") {
+      (merged as any)[key] = defaultVal;
+    }
+  }
+
+  if (savedGateway.telegramEnabled && !baseConfig?.telegramEnabled && merged.telegramToken) {
+    merged.telegramEnabled = true;
+  }
+  if (savedGateway.facebookEnabled && !baseConfig?.facebookEnabled && merged.facebookPageAccessToken) {
+    merged.facebookEnabled = true;
+  }
+  if (savedGateway.whatsappGateway && (!baseConfig?.whatsappGateway || baseConfig.whatsappGateway === "mock") && savedGateway.whatsappGateway !== "mock") {
+    merged.whatsappGateway = savedGateway.whatsappGateway;
+  }
+
+  return merged;
+}
+
+let cachedDb: {
+  articles: Article[];
+  sources: NewsSource[];
+  config: SystemConfig;
+  logs: SystemLog[];
+} | null = null;
+
+// Database Initialization Helper (In-Memory Authoritative Singleton + Atomic Disk Persistence)
+function loadDb() {
+  if (cachedDb) {
+    return cachedDb;
+  }
+
+  const tryReadFile = (filePath: string) => {
+    if (!fs.existsSync(filePath)) return null;
+    try {
+      const data = fs.readFileSync(filePath, "utf-8");
+      if (!data || !data.trim()) return null;
+      return JSON.parse(data);
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const parsed = tryReadFile(DB_PATH) || tryReadFile(DB_BACKUP_PATH);
+  if (parsed) {
+    if (!Array.isArray(parsed.articles)) parsed.articles = [];
+    if (!Array.isArray(parsed.sources) || parsed.sources.length === 0) {
+      parsed.sources = [...DEFAULT_SOURCES];
+    }
+    parsed.config = mergeConfigWithSavedSecrets(parsed.config);
+    if (!Array.isArray(parsed.logs)) parsed.logs = [];
+    cachedDb = parsed;
+    saveGatewayConfigFile(parsed.config);
+    writeJsonAtomic(DB_PATH, cachedDb);
+    return cachedDb!;
+  }
+
+  const freshConfig = mergeConfigWithSavedSecrets(DEFAULT_CONFIG);
+  const freshDb = {
+    articles: [] as Article[],
+    sources: [...DEFAULT_SOURCES],
+    config: freshConfig,
+    logs: [] as SystemLog[]
+  };
+  cachedDb = freshDb;
+  saveGatewayConfigFile(freshConfig);
+  writeJsonAtomic(DB_PATH, freshDb);
+  writeJsonAtomic(DB_BACKUP_PATH, freshDb);
+  return freshDb;
 }
 
 function saveDb(db: any) {
   try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+    if (!db) return;
+    cachedDb = db;
+    writeJsonAtomic(DB_PATH, db);
+    writeJsonAtomic(DB_BACKUP_PATH, db);
   } catch (e) {
     console.error("Failed to save database file...", e);
   }
@@ -397,7 +495,11 @@ async function wordpressPublishXmlRpc(config: SystemConfig, title: string, htmlC
   
   const response = await fetch(xmlUrl, {
     method: "POST",
-    headers: { "Content-Type": "text/xml" },
+    headers: {
+      "Content-Type": "text/xml",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/xml, application/xml, */*"
+    },
     body: xmlPayload
   });
 
@@ -448,7 +550,9 @@ async function uploadMediaToWordPressRest(config: SystemConfig, imageUrl: string
       headers: {
         "Authorization": `Basic ${credentials}`,
         "Content-Type": "image/jpeg",
-        "Content-Disposition": `attachment; filename="${filename}"`
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json"
       },
       body: buffer
     });
@@ -491,7 +595,9 @@ async function wordpressPublishRest(config: SystemConfig, title: string, htmlCon
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Basic ${credentials}`
+      "Authorization": `Basic ${credentials}`,
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "application/json"
     },
     body: JSON.stringify(postPayload)
   });
@@ -1457,6 +1563,11 @@ function sanitizeInlineHtml(html: string, baseUrl?: string, allowBlockquoteChild
     .replace(/<figure[\s\S]*?<\/figure>/gi, "")
     .replace(/<img\b[^>]*>/gi, "");
 
+  // Remove inline parenthetical or bracketed related news callouts inside paragraphs, e.g. "(Read also: <a ...>...</a>)" or "[Read More: <a ...>...</a>]"
+  cleaned = cleaned
+    .replace(/[\(\[]\s*(?:read\s+also|also\s+read|read\s+more|see\s+also|related(?:\s+news|\s+story)?)\s*:\s*<a\b[^>]*>[\s\S]*?<\/a>\s*[\)\]]/gi, "")
+    .replace(/(?:^|\s)[–—-]\s*(?:read\s+also|also\s+read|read\s+more|see\s+also|related)\s*:\s*<a\b[^>]*>[\s\S]*?<\/a>/gi, "");
+
   // Normalize valid <a href="..."> tags and unwrap invalid/anchor-only links
   cleaned = cleaned.replace(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi, (_m, attrs, inner) => {
     const hrefMatch = attrs.match(/\bhref=["']([^"']+)["']/i);
@@ -1602,6 +1713,16 @@ function shouldExcludeBlockText(plainText: string, sourceName: string): boolean 
     lowerP === "advertisement" ||
     lowerP === "also read" ||
     lowerP === "read more" ||
+    lowerP === "read also" ||
+    lowerP === "see also" ||
+    lowerP === "related" ||
+    lowerP === "related news" ||
+    lowerP === "related stories" ||
+    lowerP === "related articles" ||
+    lowerP === "more stories" ||
+    lowerP === "recommended" ||
+    lowerP === "don't miss" ||
+    lowerP === "must read" ||
     lowerP === "sponsor ad" ||
     lowerP === "advert" ||
     lowerP === "advert –>" ||
@@ -1610,15 +1731,64 @@ function shouldExcludeBlockText(plainText: string, sourceName: string): boolean 
     lowerP.startsWith("also read") ||
     lowerP.startsWith("read also") ||
     lowerP.startsWith("read more") ||
+    lowerP.startsWith("see also") ||
     lowerP.startsWith("advertisement") ||
     lowerP.startsWith("related news") ||
     lowerP.startsWith("related post") ||
+    lowerP.startsWith("related story") ||
+    lowerP.startsWith("related stories") ||
     lowerP.startsWith("related article") ||
     lowerP.startsWith("inline related") ||
+    lowerP.startsWith("more stories") ||
+    lowerP.startsWith("recommended:") ||
+    lowerP.startsWith("recommended for you") ||
+    lowerP.startsWith("don't miss:") ||
+    lowerP.startsWith("dont miss:") ||
+    lowerP.startsWith("must read:") ||
+    lowerP.startsWith("in other news:") ||
+    lowerP.startsWith("icymi:") ||
+    lowerP.startsWith("more on this:") ||
+    lowerP.startsWith("check out:") ||
+    lowerP.startsWith("click here to read") ||
+    /^(?:read\s+also|also\s+read|read\s+more|see\s+also|related(?:\s+news|\s+stories|\s+articles)?|recommended|don'?t\s+miss|must\s+read|icymi|in\s+other\s+news)\s*[:\-–—]/i.test(p) ||
     /related:\s/i.test(p) ||
-    /\[related\]/i.test(p)
+    /\[(?:related|read\s+also|also\s+read|read\s+more)[^\]]*\]/i.test(p)
   ) {
     return true;
+  }
+
+  return false;
+}
+
+// Helper to detect if a block (<p>, <li>, <blockquote>, <h3>, <h4>) is a suggested inline related news link
+function isInlineRelatedNewsBlock(innerRawHtml: string, plainText: string): boolean {
+  const p = plainText.trim();
+  if (!p) return true;
+
+  // 1. Check explicit related/callout prefixes
+  if (
+    /^(?:read\s+also|also\s+read|read\s+more|see\s+also|related(?:\s+news|\s+post|\s+story|\s+stories|\s+articles)?|more\s+stories|recommended(?:\s+for\s+you)?|don'?t\s+miss|must\s+read|icymi|in\s+other\s+news|more\s+on\s+this|check\s+out|trending\s+now)\b/i.test(p)
+  ) {
+    return true;
+  }
+
+  // 2. Check if the block contains an <a href="..."> tag and consists almost entirely of that hyperlink
+  // (e.g., <p><a href="...">Headline of another article</a></p> or <p><strong><a href="...">Headline</a></strong></p>)
+  if (/<a\b[^>]*href=/i.test(innerRawHtml)) {
+    const withoutFormattingTags = innerRawHtml
+      .replace(/<\/?(?:strong|b|em|i|span|u|small|br|p)\b[^>]*>/gi, "")
+      .trim();
+
+    // If the entire block after removing formatting wrappers is one or more <a>...</a> links (with optional bullet/colon/dash)
+    if (/^(?:[\s•·›»>:\-–—]*<a\b[^>]*>[\s\S]*?<\/a>[\s•·›»>,;.\-–—]*)+$/i.test(withoutFormattingTags)) {
+      return true;
+    }
+
+    // Or if the text outside of <a>...</a> tags is just a tiny label (< 18 chars like "Read:", "News:", "Link:", etc.)
+    const textOutsideLinks = decodeAndCleanHtml(innerRawHtml.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, "")).trim();
+    if (textOutsideLinks.length < 18 && p.length < 220) {
+      return true;
+    }
   }
 
   return false;
@@ -1636,7 +1806,14 @@ function extractStructuredArticleBlocks(
   let html = rawInput
     // Strip any previously appended What You Should Know or Media Partner Credit sections (if re-enriching)
     .replace(/<h3[^>]*>\s*What You Should Know\s*<\/h3>[\s\S]*$/i, "")
-    .replace(/<hr[^>]*>\s*<p[^>]*>\s*(?:News\s+)?Credit to our media partner[\s\S]*$/i, "");
+    .replace(/<hr[^>]*>\s*<p[^>]*>\s*(?:News\s+)?Credit to our media partner[\s\S]*$/i, "")
+    // Strip WordPress oEmbed inline related post blockquotes & iframes
+    .replace(/<blockquote\b[^>]*class=["'][^"']*wp-embedded-content[^"']*["'][^>]*>[\s\S]*?<\/blockquote>/gi, "")
+    .replace(/<iframe\b[^>]*class=["'][^"']*wp-embedded-content[^"']*["'][^>]*>[\s\S]*?<\/iframe>/gi, "")
+    // Strip inline related news containers (divs, asides, sections, lists, paragraphs with related/read-also classes)
+    .replace(/<(div|aside|section|p|ul|ol|span|blockquote)\b[^>]*(?:class|id)=["'][^"']*(?:related|read-also|also-read|see-also|more-stories|recommended|yarpp|crp_related|jp-relatedposts|wp-embed|dont-miss|must-read|in-other-news|inline-related|post-nav)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi, "")
+    // Strip inline "Read Also / Related News" heading + immediately following <ul>/<ol> list of links
+    .replace(/<(?:h[2-6]|p|div|strong)\b[^>]*>\s*(?:<[^>]+>\s*)*(?:read\s+also|also\s+read|read\s+more|see\s+also|related\s+(?:news|stories|articles|posts)|more\s+stories|recommended(?:\s+for\s+you)?|don'?t\s+miss|must\s+read|icymi|in\s+other\s+news)\s*:?\s*(?:<\/[^>]+>\s*)*<\/(?:h[2-6]|p|div|strong)>\s*(?:<(?:ul|ol)\b[^>]*>[\s\S]*?<\/(?:ul|ol)>)?/gi, "");
 
   const isAriseTv =
     (sourceName || "").toLowerCase().includes("arise") ||
@@ -1707,7 +1884,7 @@ function extractStructuredArticleBlocks(
         break;
       }
 
-      if (shouldExcludeBlockText(plainText, sourceName)) continue;
+      if (shouldExcludeBlockText(plainText, sourceName) || isInlineRelatedNewsBlock(innerRaw, plainText)) continue;
 
       if (tag === "ul" || tag === "ol") {
         const liRegex = /<li\b[^>]*>([\s\S]*?)<\/li>/gi;
@@ -1715,7 +1892,7 @@ function extractStructuredArticleBlocks(
         let liMatch;
         while ((liMatch = liRegex.exec(innerRaw)) !== null) {
           const liPlain = decodeAndCleanHtml(liMatch[1]).trim();
-          if (!liPlain || shouldExcludeBlockText(liPlain, sourceName)) continue;
+          if (!liPlain || shouldExcludeBlockText(liPlain, sourceName) || isInlineRelatedNewsBlock(liMatch[1], liPlain)) continue;
           if (/^\d+\s+(?:seconds?|minutes?|hours?|days?)\s+ago$/i.test(liPlain)) continue;
           const sanitizedLi = sanitizeInlineHtml(liMatch[1], baseUrl);
           if (sanitizedLi) {
@@ -1726,13 +1903,13 @@ function extractStructuredArticleBlocks(
           blocks.push(`<${tag}>\n${validLis.join("\n")}\n</${tag}>`);
         }
       } else if (tag === "blockquote") {
-        if (plainText.length < 5) continue;
+        if (plainText.length < 5 || isInlineRelatedNewsBlock(innerRaw, plainText)) continue;
         const sanitizedQuote = sanitizeInlineHtml(innerRaw, baseUrl, true);
         if (sanitizedQuote) {
           blocks.push(`<blockquote>${sanitizedQuote}</blockquote>`);
         }
       } else if (tag === "h2" || tag === "h3" || tag === "h4") {
-        if (plainText.length < 3) continue;
+        if (plainText.length < 3 || isInlineRelatedNewsBlock(innerRaw, plainText)) continue;
         const outHeadingTag = tag === "h2" ? "h3" : tag;
         let sanitizedHeading = sanitizeInlineHtml(innerRaw, baseUrl);
         // Strip any leading hashtags or breadcrumbs inside headings
@@ -1743,13 +1920,13 @@ function extractStructuredArticleBlocks(
           blocks.push(`<${outHeadingTag}>${sanitizedHeading}</${outHeadingTag}>`);
         }
       } else if (tag === "p") {
-        if (plainText.length < 12) continue;
+        if (plainText.length < 12 || isInlineRelatedNewsBlock(innerRaw, plainText)) continue;
         let sanitizedP = sanitizeInlineHtml(innerRaw, baseUrl);
         // Strip any leading hashtags (e.g. #HotTopics #BAT100Days #Beyond100Days) prepended to a paragraph
         sanitizedP = sanitizedP
           .replace(/^(?:<[^>]+>)*\s*(?:#[a-zA-Z0-9_-]+[\s,|•·-]*)+/gi, "")
           .trim();
-        if (sanitizedP && decodeAndCleanHtml(sanitizedP).length >= 12) {
+        if (sanitizedP && decodeAndCleanHtml(sanitizedP).length >= 12 && !isInlineRelatedNewsBlock(sanitizedP, decodeAndCleanHtml(sanitizedP))) {
           blocks.push(`<p>${sanitizedP}</p>`);
         }
       }
@@ -1798,6 +1975,23 @@ function extractStructuredArticleBlocks(
       blocks.shift();
     } else {
       break;
+    }
+  }
+
+  // If blocks[0] is a short summary/deck paragraph that shares the exact same opening words as blocks[1] (e.g. TVC News excerpt printed above the lead paragraph), drop blocks[0]
+  if (blocks.length >= 2 && /^<p\b/i.test(blocks[0]) && /^<p\b/i.test(blocks[1])) {
+    const p0Plain = decodeAndCleanHtml(blocks[0]).trim();
+    const p1Plain = decodeAndCleanHtml(blocks[1]).trim();
+    const p0Words = p0Plain.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+    const p1Words = p1Plain.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+    const sharedOpening =
+      p0Words.length >= 4 &&
+      p1Words.length >= 4 &&
+      p0Words[0] === p1Words[0] &&
+      p0Words[1] === p1Words[1] &&
+      p0Words[2] === p1Words[2];
+    if (sharedOpening) {
+      blocks.shift();
     }
   }
 
@@ -2080,7 +2274,7 @@ async function runAIElegancyAgent(
       if (crawl.fullText === "HTTP_404_ERROR") {
         throw new Error("ARTICLE_404_NOT_FOUND");
       }
-      if (crawl.structuredBlocks.length >= structuredBlocks.length && crawl.structuredBlocks.length > 0) {
+      if (crawl.structuredBlocks.length >= 2 || crawl.structuredBlocks.length >= structuredBlocks.length) {
         structuredBlocks = extractStructuredArticleBlocks(crawl.structuredBlocks.join("\n"), sourceName, articleUrl, originalTitle);
       }
       if (crawl.fullText && crawl.fullText.length > decodeAndCleanHtml(textToAnalyze).length) {
@@ -2107,26 +2301,31 @@ async function runAIElegancyAgent(
     const userPrompt = `You are the Lead Editorial AI Agent for "SaaMedia News Agent", an elite Nigerian news portal.
 Your task is to curate this news article according to strict editorial specifications.
 
-SOURCE DETAILS:
-- Original Title: "${originalTitle}"
-- Source Publisher: "${sourceName || "Unknown"}"
-- Article Link: "${articleUrl || ""}"
+ISOLATED INPUTS TO PARAPHRASE:
+- Isolated Original Title to Paraphrase:
+"${originalTitle}"
 - Isolated First Paragraph to Paraphrase:
 "${firstParagraphPlain}"
-- Full Article Context (for understanding the whole story and writing the "What You Should Know" section):
+
+ADDITIONAL CONTEXT:
+- Source Publisher: "${sourceName || "Unknown"}"
+- Article Link: "${articleUrl || ""}"
+- Full Article Context (ONLY for understanding the whole story to write the "What You Should Know" section — do NOT rewrite or summarize the rest of the article):
 "${fullPlainContext}"
 
 MEDIA ASSETS:
 ${inputImagesText}
 
 STRICT EDITORIAL SPECIFICATIONS:
-1. Write a Captivating, SEO-Optimized Title (polished, professional, accurate). Do NOT include any hashtags (such as #HotTopics, #BAT100Days, #Beyond100Days) or breadcrumbs in the title.
-2. Write a Professional Short Summary (1-2 sentences) of the core development for social alerts.
-3. Select ONE Category from: "Politics", "Business", "Security", "Economy", "National".
-4. Paraphrase ONLY the First Paragraph ("paraphrasedFirstParagraph"):
-   - Refine and paraphrase ONLY the isolated first paragraph above while strictly preserving its core message, announcement, names, dates, locations, and key facts.
-   - Do NOT include any breadcrumbs or hashtag words (like #HotTopics, #BAT100Days, #Beyond100Days) at the start of the paragraph.
-   - Return ONLY the paraphrased first paragraph text (you may use <strong> or <em> if appropriate, without outer <p> tags). Do NOT rewrite or include the rest of the article here, because all subsequent paragraphs, subheadings, blockquotes, lists, and links from the source are automatically preserved verbatim.
+1. Paraphrase the Isolated Title ("title"):
+   - Refine and paraphrase the Isolated Original Title above into a captivating, professional, SEO-optimized headline while strictly preserving its core message, announcements, names, dates, and key facts.
+   - Do NOT include any hashtags (such as #HotTopics, #BAT100Days, #Beyond100Days) or breadcrumbs in the paraphrased title.
+2. Paraphrase ONLY the Isolated First Paragraph ("paraphrasedFirstParagraph"):
+   - Refine and paraphrase ONLY the Isolated First Paragraph above while strictly preserving its core message, announcements, names, dates, locations, and key facts.
+   - Do NOT include any breadcrumbs, inline related news links, or hashtag words (like #HotTopics, #BAT100Days, #Beyond100Days) in the paragraph.
+   - Return ONLY the paraphrased first paragraph text (you may use <strong> or <em> if appropriate, without outer <p> tags). Do NOT rewrite, summarize, or shorten the rest of the article, because all subsequent paragraphs, subheadings, blockquotes, lists, and formatting from the source are automatically preserved verbatim.
+3. Write a Professional Short Summary ("summary", 1-2 sentences) of the core development for social alerts.
+4. Select ONE Category ("category") from: "Politics", "Business", "Security", "Economy", "National".
 5. Write the "What You Should Know" Layman Section ("whatYouShouldKnowHtml"):
    - Simplify and summarize the entire story in accessible, everyday layman terms.
    - Clearly explain what the news means and how it can affect everyday people and readers both POSITIVELY (benefits, convenience, relief, or opportunities) and/or NEGATIVELY (risks, drawbacks, costs, challenges, or industry disruption).
@@ -2140,18 +2339,18 @@ STRICT EDITORIAL SPECIFICATIONS:
 
 Respond strictly in valid JSON format matching this schema:
 {
-  "title": "Clean, engaging headline",
+  "title": "Refined and paraphrased headline preserving core message, names, dates, and key facts",
   "summary": "1-2 sentence quick news summary",
   "category": "One of: Politics, Business, Security, Economy, National",
   "featuredImage": "Selected image URL string",
-  "paraphrasedFirstParagraph": "Refined and paraphrased first paragraph preserving all core facts and names",
+  "paraphrasedFirstParagraph": "Refined and paraphrased first paragraph preserving all core facts, announcements, dates, and names",
   "whatYouShouldKnowHtml": "<p>Accessible layman summary explaining what this means...</p><ul><li><strong>Positive Impact:</strong> ...</li><li><strong>Potential Concerns:</strong> ...</li></ul>"
 }`;
 
     let response;
     try {
       response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-flash-lite-latest",
         contents: userPrompt,
         config: {
           responseMimeType: "application/json",
@@ -2171,7 +2370,7 @@ Respond strictly in valid JSON format matching this schema:
       });
     } catch (_modelErr) {
       response = await ai.models.generateContent({
-        model: "gemini-flash-latest",
+        model: "gemini-3-flash-preview",
         contents: userPrompt,
         config: {
           responseMimeType: "application/json",
@@ -2281,7 +2480,7 @@ Generate exactly 3 articles. Respond strictly in valid JSON matching this schema
 ]`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-flash-lite-latest",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -2321,197 +2520,204 @@ Generate exactly 3 articles. Respond strictly in valid JSON matching this schema
 }
 
 // MAIN AUTOMATED RUNNER
+let isScrapingInProgress = false;
+
 async function scrapeAndAutoProcess() {
+  if (isScrapingInProgress) {
+    addLog("info", "Sourcing pipeline is already actively running. Skipping duplicate trigger.", "scraper");
+    return;
+  }
+  isScrapingInProgress = true;
   addLog("info", "Starting News Sourcing Pipeline across active category channels...", "scraper");
-  const db = loadDb();
-  const config = db.config;
-  let newArticlesFoundCount = 0;
 
-  for (const source of db.sources) {
-    if (!source.enabled) continue;
+  try {
+    const initialDb = loadDb();
+    const sourcesToScan = [...initialDb.sources];
+    let newArticlesFoundCount = 0;
 
-    let feeds: any[] = [];
-    let fetchUrl = source.feedUrl;
+    for (const source of sourcesToScan) {
+      if (!source.enabled) continue;
 
-    // Normalizing category URLs to append WordPress RSS feeds
-    if (!fetchUrl.endsWith("/feed/") && !fetchUrl.endsWith("/feed") && !fetchUrl.endsWith(".xml")) {
-      fetchUrl = fetchUrl.endsWith("/") ? `${fetchUrl}feed/` : `${fetchUrl}/feed/`;
-    }
+      let feeds: any[] = [];
+      let fetchUrl = source.feedUrl;
 
-    addLog("info", `Sourcing news from ${source.name} via ${fetchUrl}`, "scraper");
+      // Normalizing category URLs to append WordPress RSS feeds
+      if (!fetchUrl.endsWith("/feed/") && !fetchUrl.endsWith("/feed") && !fetchUrl.endsWith(".xml")) {
+        fetchUrl = fetchUrl.endsWith("/") ? `${fetchUrl}feed/` : `${fetchUrl}/feed/`;
+      }
 
-    try {
-      let parsedSuccess = false;
+      addLog("info", `Sourcing news from ${source.name} via ${fetchUrl}`, "scraper");
 
-      // 1. Try real XML/feed fetch
       try {
-        const response = await fetch(fetchUrl, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/xml, application/xml, text/html"
-          },
-          signal: AbortSignal.timeout(8000) // 8 seconds timeout
-        });
+        let parsedSuccess = false;
 
-        if (response.ok) {
-          const text = await response.text();
-          if (text.includes("<item>") || text.includes("<feed>") || text.includes("<channel>")) {
-            feeds = parseRssXml(text);
-            if (feeds.length > 0) {
-              addLog("success", `Scraped ${feeds.length} items from ${source.name} live XML feed.`, "scraper");
+        // 1. Try real XML/feed fetch
+        try {
+          const response = await fetch(fetchUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "text/xml, application/xml, text/html"
+            },
+            signal: AbortSignal.timeout(8000) // 8 seconds timeout
+          });
+
+          if (response.ok) {
+            const text = await response.text();
+            if (text.includes("<item>") || text.includes("<feed>") || text.includes("<channel>")) {
+              feeds = parseRssXml(text);
+              if (feeds.length > 0) {
+                addLog("success", `Scraped ${feeds.length} items from ${source.name} live XML feed.`, "scraper");
+                parsedSuccess = true;
+              }
+            }
+          }
+        } catch (xmlErr: any) {
+          addLog("info", `XML Feed fetch failed for ${source.name}: ${xmlErr.message}`, "scraper");
+        }
+
+        // 2. Fallback to HTML Scraper on the original category webpage
+        if (!parsedSuccess) {
+          addLog("info", `XML Parse was empty. Attempting HTML category scraper fallback on original link: ${source.feedUrl}...`, "scraper");
+          const htmlResponse = await fetch(source.feedUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+              "Accept": "text/html"
+            },
+            signal: AbortSignal.timeout(8000)
+          });
+
+          if (htmlResponse.ok) {
+            const htmlText = await htmlResponse.text();
+            const scrapedItems: any[] = [];
+            
+            // Regex scan for <a href="LINK">TITLE</a>
+            const linkRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+            let linkMatch;
+            while ((linkMatch = linkRegex.exec(htmlText)) !== null) {
+              const href = linkMatch[1].trim();
+              const innerHtml = linkMatch[2];
+              
+              // Skip non-article URLs (e.g. author pages, category grids, tags, hashtags, topics, feed links, graphics/assets)
+              if (!href.startsWith("http") || 
+                  href.includes("/category/") || 
+                  href.includes("/tag/") || 
+                  href.includes("/tags/") || 
+                  href.includes("/hashtag/") || 
+                  href.includes("/topic/") || 
+                  href.includes("/topics/") || 
+                  href.includes("/author/") || 
+                  href.endsWith(".png") || 
+                  href.endsWith(".jpg") || 
+                  href.endsWith(".css") || 
+                  href.endsWith(".js") || 
+                  href.includes("/feed") || 
+                  href === source.url || 
+                  href === source.feedUrl) {
+                continue;
+              }
+              
+              const pathSegments = href.split("/").filter(Boolean);
+              if (pathSegments.length < 3) {
+                continue; // Too short to be a valid news article post url
+              }
+
+              // If the anchor wraps a heading tag, prefer the heading text over surrounding hashtag/breadcrumb badges
+              const headingInside = innerHtml.match(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i);
+              const rawAnchorContent = headingInside ? headingInside[1] : innerHtml
+                .replace(/<(?:span|div|small)\b[^>]*class=["'][^"']*(?:tag|hashtag|cat|badge|breadcrumb|meta|date)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|small)>/gi, " ");
+              
+              let title = cleanScrapedTitle(rawAnchorContent);
+              if (title.length > 15 && title.length < 200 && 
+                  !title.startsWith("#") &&
+                  !title.toLowerCase().includes("read more") && 
+                  !title.toLowerCase().includes("comment") && 
+                  !title.toLowerCase().includes("share") &&
+                  !title.toLowerCase().includes("<img")) {
+                
+                if (!scrapedItems.some(l => l.link === href)) {
+                  scrapedItems.push({
+                    title,
+                    link: href,
+                    description: `${source.name} category update. Open article for detailed news content.`,
+                    pubDate: new Date().toISOString()
+                  });
+                }
+              }
+            }
+
+            if (scrapedItems.length > 0) {
+              feeds = scrapedItems.slice(0, 8);
+              addLog("success", `HTML Category Scraper extracted ${feeds.length} live articles from HTML page catalog of ${source.name}!`, "scraper");
               parsedSuccess = true;
             }
           }
         }
-      } catch (xmlErr: any) {
-        addLog("info", `XML Feed fetch failed for ${source.name}: ${xmlErr.message}`, "scraper");
+
+        if (!parsedSuccess) {
+          throw new Error("Both direct category feed URL fetch and HTML catalog card extraction returned 0 items");
+        }
+      } catch (err: any) {
+        addLog("warn", `Live Scraping of ${source.name} failed (${err.message}). Triggering AI Sourcing Agent fallback...`, "scraper");
+        feeds = await runAIAlternateScraper(source.name, source.type);
+        addLog("success", `AI Sourcing Agent successfully recovered ${feeds.length} trending items for ${source.name}`, "scraper");
       }
 
-      // 2. Fallback to HTML Scraper on the original category webpage
-      if (!parsedSuccess) {
-        addLog("info", `XML Parse was empty. Attempting HTML category scraper fallback on original link: ${source.feedUrl}...`, "scraper");
-        const htmlResponse = await fetch(source.feedUrl, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html"
-          },
-          signal: AbortSignal.timeout(8000)
-        });
+      // Process up to 5 latest items per source per cycle so articles appear immediately in the Editorial Queue
+      const itemsToProcess = feeds.slice(0, 5);
 
-        if (htmlResponse.ok) {
-          const htmlText = await htmlResponse.text();
-          const scrapedItems: any[] = [];
-          
-          // Regex scan for <a href="LINK">TITLE</a>
-          const linkRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-          let linkMatch;
-          while ((linkMatch = linkRegex.exec(htmlText)) !== null) {
-            const href = linkMatch[1].trim();
-            const innerHtml = linkMatch[2];
-            
-            // Skip non-article URLs (e.g. author pages, category grids, tags, hashtags, topics, feed links, graphics/assets)
-            if (!href.startsWith("http") || 
-                href.includes("/category/") || 
-                href.includes("/tag/") || 
-                href.includes("/tags/") || 
-                href.includes("/hashtag/") || 
-                href.includes("/topic/") || 
-                href.includes("/topics/") || 
-                href.includes("/author/") || 
-                href.endsWith(".png") || 
-                href.endsWith(".jpg") || 
-                href.endsWith(".css") || 
-                href.endsWith(".js") || 
-                href.includes("/feed") || 
-                href === source.url || 
-                href === source.feedUrl) {
+      for (const item of itemsToProcess) {
+        // 1. Enforce recent publication date (36h window to account for timezone offsets across Nigerian & UTC servers)
+        if (item.pubDate) {
+          const pubTime = Date.parse(item.pubDate);
+          if (!isNaN(pubTime)) {
+            const hoursAgo = (Date.now() - pubTime) / (1000 * 60 * 60);
+            if (hoursAgo > 36) {
+              addLog("info", `Skipping "${item.title}" from ${source.name} - published ${Math.round(hoursAgo)} hours ago.`, "scraper");
               continue;
             }
-            
-            const pathSegments = href.split("/").filter(Boolean);
-            if (pathSegments.length < 3) {
-              continue; // Too short to be a valid news article post url
-            }
+          }
+        }
 
-            // If the anchor wraps a heading tag, prefer the heading text over surrounding hashtag/breadcrumb badges
-            const headingInside = innerHtml.match(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/i);
-            const rawAnchorContent = headingInside ? headingInside[1] : innerHtml
-              .replace(/<(?:span|div|small)\b[^>]*class=["'][^"']*(?:tag|hashtag|cat|badge|breadcrumb|meta|date)[^"']*["'][^>]*>[\s\S]*?<\/(?:span|div|small)>/gi, " ");
-            
-            let title = cleanScrapedTitle(rawAnchorContent);
-            if (title.length > 15 && title.length < 200 && 
-                !title.startsWith("#") &&
-                !title.toLowerCase().includes("read more") && 
-                !title.toLowerCase().includes("comment") && 
-                !title.toLowerCase().includes("share") &&
-                !title.toLowerCase().includes("<img")) {
-              
-              if (!scrapedItems.some(l => l.link === href)) {
-                scrapedItems.push({
-                  title,
-                  link: href,
-                  description: `${source.name} category update. Open article for detailed news content.`,
-                  pubDate: new Date().toISOString()
-                });
-              }
+        // Check URL slug if there's a date pattern like /YYYY/MM/DD/ (using end-of-day UTC so yesterday/today articles are never falsely skipped)
+        const urlDateMatch = item.link.match(/\/(\d{4})\/(\d{2})\/(\d{2})\//);
+        if (urlDateMatch) {
+          const year = parseInt(urlDateMatch[1], 10);
+          const month = parseInt(urlDateMatch[2], 10) - 1;
+          const day = parseInt(urlDateMatch[3], 10);
+          const urlDateObj = new Date(Date.UTC(year, month, day, 23, 59, 59));
+          if (!isNaN(urlDateObj.getTime())) {
+            const urlHoursAgo = (Date.now() - urlDateObj.getTime()) / (1000 * 60 * 60);
+            if (urlHoursAgo > 48) {
+              addLog("info", `Skipping "${item.title}" from ${source.name} - URL date indicates it is older than 48 hours.`, "scraper");
+              continue;
             }
           }
-
-          if (scrapedItems.length > 0) {
-            feeds = scrapedItems.slice(0, 15);
-            addLog("success", `HTML Category Scraper extracted ${feeds.length} live articles from HTML page catalog of ${source.name}!`, "scraper");
-            parsedSuccess = true;
-          }
         }
-      }
 
-      if (!parsedSuccess) {
-        throw new Error("Both direct category feed URL fetch and HTML catalog card extraction returned 0 items");
-      }
-    } catch (err: any) {
-      addLog("warn", `Live Scraping of ${source.name} failed (${err.message}). Triggering AI Sourcing Agent fallback...`, "scraper");
-      feeds = await runAIAlternateScraper(source.name, source.type);
-      addLog("success", `AI Sourcing Agent successfully recovered ${feeds.length} trending items for ${source.name}`, "scraper");
-    }
+        // 2. Double duplicate protection against current DB state
+        const currentDbCheck = loadDb();
+        const urlExists = currentDbCheck.articles.some((a: Article) => a.url === item.link);
+        const titleExists = currentDbCheck.articles.some((a: Article) => 
+          a.source === source.name && 
+          (a.originalTitle.toLowerCase().trim() === item.title.toLowerCase().trim() ||
+           a.title.toLowerCase().trim() === item.title.toLowerCase().trim())
+        );
 
-    // Check database to see if we already possess these URLs to enforce duplicate avoidance and filter by publication date
-    for (const item of feeds) {
-      // 1. Enforce publishing/scraping date: Must have been published on the same day / within 24 hours of the action
-      let isWithin24Hours = true;
-      if (item.pubDate) {
-        const pubTime = Date.parse(item.pubDate);
-        if (!isNaN(pubTime)) {
-          const hoursAgo = (Date.now() - pubTime) / (1000 * 60 * 60);
-          // If the article was published more than 24 hours ago, skip it to keep content strictly same-day/recent.
-          if (hoursAgo > 24) {
-            addLog("info", `Skipping "${item.title}" from ${source.name} - published ${Math.round(hoursAgo)} hours ago (limit: 24h).`, "scraper");
-            continue;
-          }
+        if (urlExists || titleExists) {
+          addLog("info", `Skipping already existing duplicate article: "${item.title}" from ${source.name}.`, "scraper");
+          continue;
         }
-      }
 
-      // Check URL slug if there's a date pattern like /YYYY/MM/DD/ (common in news blogs to prevent cached pages matching)
-      const urlDateMatch = item.link.match(/\/(\d{4})\/(\d{2})\/(\d{2})\//);
-      if (urlDateMatch) {
-        const year = parseInt(urlDateMatch[1], 10);
-        const month = parseInt(urlDateMatch[2], 10) - 1;
-        const day = parseInt(urlDateMatch[3], 10);
-        const urlDateObj = new Date(year, month, day);
-        if (!isNaN(urlDateObj.getTime())) {
-          const urlHoursAgo = (Date.now() - urlDateObj.getTime()) / (1000 * 60 * 60);
-          if (urlHoursAgo > 24) { 
-            addLog("info", `Skipping "${item.title}" from ${source.name} - URL date indicates it is older than 24 hours.`, "scraper");
-            continue;
-          }
-        }
-      }
+        addLog("info", `Fresh article discovered: "${item.title}". Isolating Title & 1st Paragraph for AI Curation...`, "scraper");
+        
+        let finalTitle = item.title;
+        let finalSummary = "";
+        let finalCategory = source.type || "National";
+        let finalContent = item.description || "";
+        let finalFeaturedImage: string | null = null;
+        let isEnriched = false;
 
-      // 2. Double duplicate protection: guarantee NO duplicate news articles from the same source by checking link and title matching
-      const urlExists = db.articles.some((a: Article) => a.url === item.link);
-      const titleExists = db.articles.some((a: Article) => 
-        a.source === source.name && 
-        (a.originalTitle.toLowerCase().trim() === item.title.toLowerCase().trim() ||
-         a.title.toLowerCase().trim() === item.title.toLowerCase().trim())
-      );
-
-      if (urlExists || titleExists) {
-        addLog("info", `Skipping already existing duplicate article: "${item.title}" from ${source.name}.`, "scraper");
-        continue;
-      }
-
-      addLog("info", `Fresh article discovered: "${item.title}". Fetching full webpage content...`, "scraper");
-      
-      let finalTitle = item.title;
-      let finalSummary = "";
-      let finalCategory = source.type || "National";
-      let finalContent = item.description || "";
-      let finalFeaturedImage = null;
-      let isEnriched = false;
-
-      // Limit background AI writing to first 12 articles, but ALWAYS fetch full page content!
-      if (newArticlesFoundCount < 12) {
         try {
-          addLog("info", `Crawl-research & AI rich writing triggered for "${item.title}"`, "scraper");
           const aiEdit = await runAIElegancyAgent(item.title, item.description, item.link, source.name);
           finalTitle = aiEdit.title;
           finalSummary = aiEdit.summary;
@@ -2519,14 +2725,13 @@ async function scrapeAndAutoProcess() {
           finalContent = aiEdit.contentHtml;
           finalFeaturedImage = aiEdit.featuredImage;
           isEnriched = true;
-          addLog("success", `AI successfully created full-length article preserving original details: "${finalTitle}"`, "scraper");
+          addLog("success", `AI paraphrased Title & 1st Paragraph and preserved body verbatim: "${finalTitle}"`, "scraper");
         } catch (err: any) {
           if (err.message === "ARTICLE_404_NOT_FOUND") {
             addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
             continue;
           }
           addLog("warn", `Could not auto-enrich with AI: ${err.message}. Fetching full page and saving raw full content instead.`, "scraper");
-          // Fallback to directly crawling full webpage content as raw draft
           try {
             const crawl = await fetchFullPageAndImages(item.link, source.name);
             if (crawl.fullText === "HTTP_404_ERROR") {
@@ -2546,71 +2751,80 @@ async function scrapeAndAutoProcess() {
                 finalFeaturedImage = crawl.featuredImage;
               }
             }
-          } catch (crawlErr) {
+          } catch (_crawlErr) {
             // Keep default item.description
           }
         }
-      } else {
-        addLog("info", `Queue threshold exceeded, but loading full webpage content for manual review draft...`, "scraper");
-        try {
-          const crawl = await fetchFullPageAndImages(item.link, source.name);
-          if (crawl.fullText === "HTTP_404_ERROR") {
-            addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
-            continue;
+
+        // Create fresh article and IMMEDIATELY persist to DB so it displays in "Editorial Queue" right away!
+        const newArt: Article = {
+          id: Math.random().toString(36).substring(2, 9),
+          title: finalTitle,
+          originalTitle: item.title,
+          url: item.link,
+          source: source.name,
+          scrapedAt: new Date().toISOString(),
+          content: finalContent,
+          summary: finalSummary || (item.description ? decodeAndCleanHtml(item.description).substring(0, 150) + "..." : "Local news update from Nigerian top sources."),
+          category: finalCategory,
+          status: "scraped",
+          wordpressId: null,
+          publishedAt: null,
+          whatsappSent: false,
+          whatsappError: null,
+          publishError: null,
+          featuredImage: finalFeaturedImage,
+          isEnriched: isEnriched
+        };
+
+        const latestDb = loadDb();
+        if (!latestDb.articles.some((a: Article) => a.url === newArt.url)) {
+          latestDb.articles.unshift(newArt);
+          const srcIdx = latestDb.sources.findIndex((s: NewsSource) => s.id === source.id);
+          if (srcIdx !== -1) {
+            latestDb.sources[srcIdx].lastScrapedAt = new Date().toISOString();
           }
-          const blocks = crawl.structuredBlocks.length > 0
-            ? crawl.structuredBlocks
-            : extractStructuredArticleBlocks(item.description, source.name, item.link, item.title);
-          if (blocks.length > 0) {
-            const firstBlock = blocks[0];
-            const restBlocks = blocks.slice(1);
-            const fallbackLayman = `<p>This report from ${source.name} highlights developments that may affect citizens and stakeholders positively through improved awareness and policy action, or negatively if operational challenges and costs arise.</p>`;
-            finalContent = appendEditorialSections(firstBlock, restBlocks, fallbackLayman, item.link, source.name);
-            finalSummary = decodeAndCleanHtml(firstBlock).substring(0, 150) + "...";
-            if (crawl.featuredImage) {
-              finalFeaturedImage = crawl.featuredImage;
-            }
-          }
-        } catch (crawlErr) {
-          // Keep default item.description
+          saveDb(latestDb);
+          newArticlesFoundCount++;
+          addLog("success", `Added "${newArt.title}" to Editorial Queue (${latestDb.articles.filter((a: Article) => a.status === "scraped").length} in queue).`, "scraper");
         }
       }
-
-      // We found a completely fresh article! Combine items
-      const newArt: Article = {
-        id: Math.random().toString(36).substring(2, 9),
-        title: finalTitle,
-        originalTitle: item.title,
-        url: item.link,
-        source: source.name,
-        scrapedAt: new Date().toISOString(),
-        content: finalContent,
-        summary: finalSummary || (item.description ? item.description.substring(0, 150) + "..." : "Local news update from Nigerian top sources."),
-        category: finalCategory,
-        status: "scraped",
-        wordpressId: null,
-        publishedAt: null,
-        whatsappSent: false,
-        whatsappError: null,
-        publishError: null,
-        featuredImage: finalFeaturedImage,
-        isEnriched: isEnriched
-      };
-
-      db.articles.push(newArt);
-      newArticlesFoundCount++;
     }
 
-    source.lastScrapedAt = new Date().toISOString();
+    addLog("success", `News Sourcing Finished! Discovered ${newArticlesFoundCount} brand new articles.`, "scraper");
+
+    // If Auto-Publish is Enabled: Publish queued articles to WP and send gateway notifications
+    const finalDb = loadDb();
+    if (finalDb.config.schedulerEnabled && (newArticlesFoundCount > 0 || finalDb.articles.some((a: Article) => a.status === "scraped"))) {
+      await autoPublishFreshArticles();
+    }
+  } finally {
+    isScrapingInProgress = false;
   }
+}
 
-  saveDb(db);
-  addLog("success", `News Sourcing Finished! Discovered ${newArticlesFoundCount} brand new articles.`, "scraper");
-
-  // If Auto-Publish is Enabled: Summarize, publish to WP, send WhatsApp
-  if (config.schedulerEnabled && newArticlesFoundCount > 0) {
-    addLog("info", "Auto-processing of freshly harvested news triggered...", "publisher");
-    await autoPublishFreshArticles();
+// Helper to publish to WordPress with automatic REST <-> XML-RPC protocol fallback
+async function publishArticleToWordPress(
+  config: SystemConfig,
+  title: string,
+  content: string,
+  category: string,
+  featuredImage: string | null | undefined
+): Promise<string> {
+  if (config.wordpressMode === "xmlrpc") {
+    try {
+      return await wordpressPublishXmlRpc(config, title, content, category);
+    } catch (xmlErr: any) {
+      addLog("warn", `XML-RPC publish failed (${xmlErr.message}). Attempting REST API fallback...`, "publisher");
+      return await wordpressPublishRest(config, title, content, category, featuredImage);
+    }
+  } else {
+    try {
+      return await wordpressPublishRest(config, title, content, category, featuredImage);
+    } catch (restErr: any) {
+      addLog("warn", `REST API publish failed (${restErr.message}). Attempting XML-RPC fallback...`, "publisher");
+      return await wordpressPublishXmlRpc(config, title, content, category);
+    }
   }
 }
 
@@ -2618,28 +2832,34 @@ async function scrapeAndAutoProcess() {
 async function autoPublishFreshArticles() {
   const db = loadDb();
   const config = db.config;
-  const pendingArticles = db.articles.filter((a: Article) => a.status === "scraped");
+  const pendingArticles = db.articles.filter((a: Article) => a.status === "scraped" || a.status === "approved");
 
   if (pendingArticles.length === 0) return;
 
-  addLog("info", `Auto-Publishing queue has ${pendingArticles.length} items to evaluate.`, "publisher");
+  // If WordPress password is not configured yet, keep articles in the Editorial Queue ("scraped") instead of marking them failed!
+  if (!config.wordpressUrl || !config.wordpressUsername || !config.wordpressPassword || !config.wordpressPassword.trim()) {
+    addLog("warn", `Auto-Publish on standby: ${pendingArticles.length} curated article(s) are waiting in the Editorial Queue. Enter your WordPress Application Password in "Gateways & Secrets" to publish automatically to ${config.wordpressUrl || "WordPress"} and WP Live Archive.`, "publisher");
+    return;
+  }
+
+  addLog("info", `Auto-Publishing queue has ${pendingArticles.length} items to publish to WordPress.`, "publisher");
 
   for (const article of pendingArticles) {
     try {
-      addLog("info", `Processing Article: "${article.originalTitle}"`, "summarizer");
-      
-      // Step A: Trigger Editorial Agent
-      const aiEdit = await runAIElegancyAgent(article.originalTitle, article.content, article.url, article.source);
-      
-      const paragraphsCount = countParagraphs(aiEdit.contentHtml);
-      if (paragraphsCount < 2) {
+      // Step A: Only run AI Editorial Agent if not already enriched during scraping
+      if (!article.isEnriched || !article.content || !article.content.includes("What You Should Know")) {
+        addLog("info", `Curating Title & 1st Paragraph for: "${article.originalTitle}"`, "summarizer");
+        const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
         article.title = aiEdit.title;
         article.summary = aiEdit.summary;
         article.category = aiEdit.category;
         article.content = aiEdit.contentHtml;
         article.featuredImage = aiEdit.featuredImage;
         article.isEnriched = true;
-        
+      }
+      
+      const paragraphsCount = countParagraphs(article.content);
+      if (paragraphsCount < 2) {
         article.status = "failed";
         article.publishError = `Rejected: Content has only ${paragraphsCount} paragraph(s) (minimum 2 paragraphs required to publish).`;
         addLog("warn", `Skipped Auto-Publishing "${article.title}" - Content has less than 2 paragraphs (${paragraphsCount} found).`, "publisher");
@@ -2653,29 +2873,18 @@ async function autoPublishFreshArticles() {
         continue;
       }
       
-      article.title = aiEdit.title;
-      article.summary = aiEdit.summary;
-      article.category = aiEdit.category;
-      article.content = aiEdit.contentHtml;
-      article.featuredImage = aiEdit.featuredImage;
-      article.isEnriched = true;
-      
       // Step B: Publish to WordPress
       addLog("info", `Publishing to WordPress [${config.wordpressMode.toUpperCase()}]: "${article.title}"`, "publisher");
       
-      let wpId = "";
-      if (config.wordpressMode === "xmlrpc") {
-        wpId = await wordpressPublishXmlRpc(config, article.title, article.content, article.category);
-      } else {
-        wpId = await wordpressPublishRest(config, article.title, article.content, article.category, article.featuredImage);
-      }
+      const wpId = await publishArticleToWordPress(config, article.title, article.content, article.category, article.featuredImage);
 
       article.wordpressId = wpId;
       article.publishedAt = new Date().toISOString();
       article.status = "published";
+      article.publishError = null;
       addLog("success", `Successfully published to WordPress! ID: ${wpId}`, "publisher");
 
-      // Step C: Send WhatsApp and Telegram Notifiers
+      // Step C: Send WhatsApp, Telegram, and Facebook Notifiers
       const cleanTitle = decodeAndCleanHtml(article.title);
       const rawParagraph = getFirstParagraph(article.content, article.summary);
       const cleanParagraph = truncateText(rawParagraph, 300);
@@ -2740,6 +2949,7 @@ async function autoPublishFreshArticles() {
 
 // CRON INTERVAL ENGINE
 let schedulerIntervalId: NodeJS.Timeout | null = null;
+let initialBootScrapeTriggered = false;
 function startSchedulerLoop() {
   if (schedulerIntervalId) {
     clearInterval(schedulerIntervalId);
@@ -2755,6 +2965,42 @@ function startSchedulerLoop() {
       addLog("info", `Scheduled Automation Trigger fired.`, "system");
       await scrapeAndAutoProcess();
     }, intervalMins * 60 * 1000);
+
+    // If the Editorial Queue and Archive are currently empty on boot, automatically trigger an initial scrape so articles populate immediately
+    if (!initialBootScrapeTriggered) {
+      initialBootScrapeTriggered = true;
+      setTimeout(async () => {
+        try {
+          const bootDb = loadDb();
+          if (bootDb.articles.length === 0) {
+            await scrapeAndAutoProcess();
+          } else {
+            // Re-curate any existing articles that fell back with unparaphrased title (title === originalTitle)
+            const unparaphrased = bootDb.articles.filter((a: Article) => a.status === "scraped" && a.title === a.originalTitle);
+            for (const art of unparaphrased) {
+              try {
+                const aiEdit = await runAIElegancyAgent(art.originalTitle, art.content, art.url, art.source);
+                const freshDb = loadDb();
+                const idx = freshDb.articles.findIndex((x: Article) => x.id === art.id);
+                if (idx !== -1) {
+                  freshDb.articles[idx].title = aiEdit.title;
+                  freshDb.articles[idx].summary = aiEdit.summary;
+                  freshDb.articles[idx].category = aiEdit.category;
+                  freshDb.articles[idx].content = aiEdit.contentHtml;
+                  freshDb.articles[idx].featuredImage = aiEdit.featuredImage;
+                  freshDb.articles[idx].isEnriched = true;
+                  saveDb(freshDb);
+                }
+              } catch (_err) {
+                // ignore individual error
+              }
+            }
+          }
+        } catch (err) {
+          console.error("Initial boot scrape error:", err);
+        }
+      }, 1500);
+    }
   } else {
     addLog("info", "System Scheduler is currently disabled in system settings.", "system");
   }
@@ -2774,9 +3020,16 @@ app.get("/api/config", (req, res) => {
 app.post("/api/config", (req, res) => {
   const db = loadDb();
   const oldGateway = db.config ? db.config.whatsappGateway : null;
-  db.config = { ...db.config, ...req.body };
+  const incoming = req.body || {};
+
+  // Merge configuration and persist to both db.json and gateway-config.json so secrets survive deployments
+  db.config = {
+    ...db.config,
+    ...incoming
+  };
+  saveGatewayConfigFile(db.config);
   saveDb(db);
-  addLog("success", `System configuration updated by admin.`, "system");
+  addLog("success", `System configuration & Gateway Secrets saved and persisted for deployment.`, "system");
   startSchedulerLoop(); // Hot restart scheduler on updated timing
   
   const newGateway = db.config.whatsappGateway;
@@ -2794,6 +3047,24 @@ app.post("/api/config", (req, res) => {
     whatsappClient = null;
     whatsappClientStatus = "DISCONNECTED";
     whatsappQrCodeDataUrl = null;
+  }
+
+  // If WordPress credentials were just provided and scheduler is enabled, automatically process any queued or previously auth-failed articles
+  if (db.config.schedulerEnabled && db.config.wordpressPassword && db.config.wordpressPassword.trim()) {
+    let resetCount = 0;
+    db.articles.forEach((a: Article) => {
+      if (a.status === "failed" && a.publishError && /401|403|password|unauthorized|authentication|rest error|xml-rpc/i.test(a.publishError)) {
+        a.status = "scraped";
+        a.publishError = null;
+        resetCount++;
+      }
+    });
+    if (resetCount > 0) {
+      saveDb(db);
+    }
+    autoPublishFreshArticles().catch(err => {
+      console.error("Background auto-publish after config save failed:", err);
+    });
   }
 
   res.json({ status: "ok", config: db.config });
@@ -2936,15 +3207,14 @@ app.post("/api/sources/bulk-delete", (req, res) => {
 app.get("/api/logs", (req, res) => {
   const db = loadDb();
   const cutOffTime = Date.now() - (48 * 60 * 60 * 1000);
-  if (Array.isArray(db.logs)) {
-    db.logs = db.logs.filter((l: any) => {
-      if (!l.timestamp) return true;
-      const logTime = Date.parse(l.timestamp);
-      return !isNaN(logTime) && logTime > cutOffTime;
-    });
-    saveDb(db);
-  }
-  res.json(db.logs);
+  const filteredLogs = Array.isArray(db.logs)
+    ? db.logs.filter((l: any) => {
+        if (!l.timestamp) return true;
+        const logTime = Date.parse(l.timestamp);
+        return !isNaN(logTime) && logTime > cutOffTime;
+      })
+    : [];
+  res.json(filteredLogs);
 });
 
 app.post("/api/logs/purge", (req, res) => {
@@ -3116,13 +3386,8 @@ app.post("/api/articles/:id/force-publish", async (req, res) => {
 
     addLog("info", `Force Publishing Article to WP: ${article.title}`, "publisher");
 
-    // 2. Publish
-    let wpId = "";
-    if (config.wordpressMode === "xmlrpc") {
-      wpId = await wordpressPublishXmlRpc(config, article.title, article.content, article.category);
-    } else {
-      wpId = await wordpressPublishRest(config, article.title, article.content, article.category, article.featuredImage);
-    }
+    // 2. Publish (with automatic REST <-> XML-RPC fallback)
+    const wpId = await publishArticleToWordPress(config, article.title, article.content, article.category, article.featuredImage);
 
     article.wordpressId = wpId;
     article.publishedAt = new Date().toISOString();

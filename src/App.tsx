@@ -103,6 +103,25 @@ export default function App() {
 
   // Local config form state to prevent background polling from resetting fields during active typing
   const [localConfig, setLocalConfig] = useState<SystemConfig | null>(null);
+  const GATEWAY_STORAGE_KEY = "saamedia_gateway_config_v1";
+
+  // Helper to read saved Gateway & Secrets from browser localStorage
+  const readSavedGatewayFromBrowser = (): Partial<SystemConfig> | null => {
+    try {
+      const raw = localStorage.getItem(GATEWAY_STORAGE_KEY);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch (_) {}
+    return null;
+  };
+
+  // Helper to persist Gateway & Secrets to browser localStorage
+  const writeSavedGatewayToBrowser = (cfg: SystemConfig) => {
+    try {
+      localStorage.setItem(GATEWAY_STORAGE_KEY, JSON.stringify(cfg));
+    } catch (_) {}
+  };
 
   // Sync with main config when entering settings, nullify when navigating away
   useEffect(() => {
@@ -112,6 +131,13 @@ export default function App() {
       setLocalConfig(null);
     }
   }, [activeTab, config]);
+
+  // Also cache any active typing in Gateways & Secrets into localStorage so values are never lost
+  useEffect(() => {
+    if (localConfig) {
+      writeSavedGatewayToBrowser(localConfig);
+    }
+  }, [localConfig]);
 
   const activeConfig = localConfig || config;
 
@@ -232,7 +258,66 @@ export default function App() {
       if (artData) setArticles(artData);
       if (srcData) setSources(srcData);
       if (logData) setLogs(logData);
-      if (cfgData) setConfig(prev => ({ ...prev, ...cfgData }));
+      if (cfgData) {
+        // Check if browser has saved Gateway & Secrets that need to be restored onto a newly deployed server container
+        const savedBrowserCfg = readSavedGatewayFromBrowser();
+        let mergedCfg: SystemConfig = { ...cfgData };
+        let needsServerSync = false;
+
+        if (savedBrowserCfg) {
+          const secretFields: (keyof SystemConfig)[] = [
+            "wordpressUrl",
+            "wordpressUsername",
+            "wordpressPassword",
+            "whatsappRecipient",
+            "whatsappSenderNumber",
+            "whatsappAccountSid",
+            "whatsappApiKey",
+            "apiKeyOverride",
+            "telegramToken",
+            "telegramChatId",
+            "facebookPageId",
+            "facebookPageAccessToken"
+          ];
+
+          for (const field of secretFields) {
+            const serverVal = mergedCfg[field];
+            const browserVal = savedBrowserCfg[field];
+            if ((!serverVal || String(serverVal).trim() === "") && browserVal && String(browserVal).trim() !== "") {
+              (mergedCfg as any)[field] = browserVal;
+              needsServerSync = true;
+            }
+          }
+
+          if (savedBrowserCfg.wordpressMode && mergedCfg.wordpressMode !== savedBrowserCfg.wordpressMode) {
+            mergedCfg.wordpressMode = savedBrowserCfg.wordpressMode;
+            needsServerSync = true;
+          }
+          if (savedBrowserCfg.whatsappGateway && savedBrowserCfg.whatsappGateway !== "mock" && mergedCfg.whatsappGateway === "mock") {
+            mergedCfg.whatsappGateway = savedBrowserCfg.whatsappGateway;
+            needsServerSync = true;
+          }
+          if (savedBrowserCfg.telegramEnabled && !mergedCfg.telegramEnabled && mergedCfg.telegramToken) {
+            mergedCfg.telegramEnabled = true;
+            needsServerSync = true;
+          }
+          if (savedBrowserCfg.facebookEnabled && !mergedCfg.facebookEnabled && mergedCfg.facebookPageAccessToken) {
+            mergedCfg.facebookEnabled = true;
+            needsServerSync = true;
+          }
+        }
+
+        setConfig(prev => ({ ...prev, ...mergedCfg }));
+        writeSavedGatewayToBrowser(mergedCfg);
+
+        if (needsServerSync) {
+          fetch("/api/config", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(mergedCfg)
+          }).catch(() => {});
+        }
+      }
       if (statData) setStats(statData);
 
       // If absolutely everything failed, notify about backend offline state (unless background poll)
@@ -252,21 +337,23 @@ export default function App() {
   // Trigger manual immediate scraping cycle
   const handleScrapeNow = async () => {
     setScraping(true);
-    triggerAlert("info", "Contacting Sourcing & Alternate Generative Agents...");
+    triggerAlert("info", "Sourcing live news & paraphrasing Title + 1st Paragraph...");
     try {
       const res = await fetch("/api/scrape", { method: "POST" });
       if (res.ok) {
-        triggerAlert("success", "SaaMedia news scraping cycle triggered successfully!");
-        // We delay data update slightly to let the agent process
-        setTimeout(fetchData, 2000);
+        triggerAlert("success", "Scraping & AI Curation started! Articles will appear in Editorial Queue progressively.");
+        // Poll progressively as articles are scraped and saved one by one
+        [2500, 6000, 10000, 15000, 22000, 30000].forEach(delay => {
+          setTimeout(() => fetchData(true), delay);
+        });
       } else {
         triggerAlert("error", "Failed to launch immediate scraping task.");
       }
     } catch (e) {
       triggerAlert("error", "Failed to connect to scraping service.");
     } finally {
-      // Keep scraping animation active for 2.5s to show workflow
-      setTimeout(() => setScraping(false), 2500);
+      // Keep scraping animation active for 4s to show workflow
+      setTimeout(() => setScraping(false), 4000);
     }
   };
 
@@ -274,6 +361,7 @@ export default function App() {
   const handleSaveConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!localConfig) return;
+    writeSavedGatewayToBrowser(localConfig);
     try {
       const res = await fetch("/api/config", {
         method: "POST",
@@ -281,7 +369,7 @@ export default function App() {
         body: JSON.stringify(localConfig)
       });
       if (res.ok) {
-        triggerAlert("success", "Gateways and WP credentials saved. Scheduler updated.");
+        triggerAlert("success", "Gateways and WP credentials saved and persisted for deployment.");
         setConfig(localConfig);
         fetchData();
       } else {
@@ -645,8 +733,14 @@ export default function App() {
     }
   };
 
-  // Filter queues
-  const reviewQueue = articles.filter(a => a.status === "scraped" || a.status === "approved" || a.status === "failed" || a.status === "publishing");
+  // Filter queues (sorted newest first)
+  const reviewQueue = articles
+    .filter(a => a.status === "scraped" || a.status === "approved" || a.status === "failed" || a.status === "publishing")
+    .sort((a, b) => {
+      const timeA = a.scrapedAt ? new Date(a.scrapedAt).getTime() : 0;
+      const timeB = b.scrapedAt ? new Date(b.scrapedAt).getTime() : 0;
+      return timeB - timeA;
+    });
   const publishedArchive = articles
     .filter(a => a.status === "published")
     .sort((a, b) => {
@@ -1078,7 +1172,7 @@ export default function App() {
                             <Sparkles className="h-4 w-4 text-emerald-350" /> AI Editorial Enrichment
                           </h4>
                           <p className="text-xs text-slate-400 max-w-lg leading-relaxed">
-                            Research and transform this RSS snippet introduction into a comprehensive 4-paragraph full-length story with matching professional photos.
+                            Isolate and paraphrase the Title and First Paragraph while preserving the remaining article body verbatim and appending the "What You Should Know" layman section.
                           </p>
                         </div>
                         <button
