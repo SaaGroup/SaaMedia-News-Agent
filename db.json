@@ -1,5 +1,6 @@
 {
   "articles": [],
+  "scrapedHistory": [],
   "sources": [
     {
       "id": "dailytrust-home",
@@ -46,5 +47,13 @@
     "facebookPageAccessToken": "",
     "facebookEnabled": false
   },
-  "logs": []
+  "logs": [
+    {
+      "id": "7te0rmc",
+      "timestamp": "2026-10-13T16:05:53.961Z",
+      "level": "info",
+      "message": "System Scheduler initiated! Runs automatically every 180 minutes.",
+      "section": "system"
+    }
+  ]
 }
