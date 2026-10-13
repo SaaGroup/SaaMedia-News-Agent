@@ -2381,7 +2381,7 @@ async function fetchFullPageAndImages(url: string, sourceName: string): Promise<
 function appendEditorialSections(
   firstParagraphHtml: string,
   remainingBlocks: string[],
-  whatYouShouldKnowBodyHtml: string,
+  whatYouShouldKnowBodyHtml?: string,
   _articleUrl?: string,
   _sourceName?: string
 ): string {
@@ -2396,19 +2396,47 @@ function appendEditorialSections(
     parts.push(remainingBlocks.join("\n\n"));
   }
 
-  // Append "What You Should Know" Layman Section
+  // Append "What You Should Know" Layman Section ONLY if genuinely provided by AI
   let laymanContent = (whatYouShouldKnowBodyHtml || "").trim();
   // Remove duplicate <h3>What You Should Know</h3> if the AI included it inside whatYouShouldKnowHtml
   laymanContent = laymanContent.replace(/^<h3[^>]*>\s*What You Should Know\s*<\/h3>\s*/i, "").trim();
-  if (!laymanContent) {
-    laymanContent = `<p>This development carries direct implications for everyday citizens and stakeholders. Positively, timely implementation and transparency can improve public service delivery, economic confidence, and community welfare. Conversely, any delays, rising costs, or regulatory friction could pose short-term challenges for households and local businesses.</p>`;
-  } else if (!/^<(?:p|ul|ol)\b/i.test(laymanContent)) {
-    laymanContent = `<p>${laymanContent}</p>`;
+
+  // Guard: NEVER inject or append generic canned boilerplate summaries
+  const isGenericBoilerplate =
+    laymanContent.toLowerCase().includes("highlights key developments that may impact citizens and stakeholders") ||
+    laymanContent.toLowerCase().includes("this development carries direct implications for everyday citizens") ||
+    laymanContent.toLowerCase().includes("in simple terms, this report regarding");
+
+  if (laymanContent && !isGenericBoilerplate) {
+    if (!/^<(?:p|ul|ol)\b/i.test(laymanContent)) {
+      laymanContent = `<p>${laymanContent}</p>`;
+    }
+    parts.push(`<h3>What You Should Know</h3>\n${laymanContent}`);
   }
 
-  parts.push(`<h3>What You Should Know</h3>\n${laymanContent}`);
-
   return parts.join("\n\n");
+}
+
+// Helper to detect if Gemini API quota is exhausted (Rate Limit / 429 / Resource Exhausted)
+function isQuotaExceededError(err: any): boolean {
+  if (!err) return false;
+  if (err.message === "AI_QUOTA_EXCEEDED") return true;
+  const msg = String(err.message || "").toLowerCase();
+  const status = err.status || err.statusCode || (err.error && (err.error.code || err.error.status));
+  if (status === 429 || status === "RESOURCE_EXHAUSTED") return true;
+  if (
+    msg.includes("429") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("resource exhausted") ||
+    msg.includes("quota exceeded") ||
+    msg.includes("quota") ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests") ||
+    msg.includes("exhausted")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 // Editorial & Curation Agent:
@@ -2614,7 +2642,11 @@ Respond strictly in valid JSON format matching this schema:
     if (e.message === "ARTICLE_404_NOT_FOUND") {
       throw e;
     }
-    addLog("error", `Editorial AI Agent failed: ${e.message}. Preserving verbatim content with fallback layman section.`, "summarizer");
+    if (isQuotaExceededError(e) || e.message === "AI_QUOTA_EXCEEDED") {
+      addLog("error", `Gemini AI Quota exceeded: ${e.message}. Halting AI Editorial Curation Agent immediately.`, "summarizer");
+      throw new Error("AI_QUOTA_EXCEEDED");
+    }
+    addLog("error", `Editorial AI Agent failed: ${e.message}. Preserving verbatim content without layman section.`, "summarizer");
     console.error("Editorial AI Agent Failed, falling back...", e);
 
     const firstPIdx = structuredBlocks.findIndex(b => /^<p\b/i.test(b));
@@ -2623,12 +2655,11 @@ Respond strictly in valid JSON format matching this schema:
       ? structuredBlocks.filter((_, idx) => idx !== firstPIdx)
       : structuredBlocks.slice(1);
 
-    const fallbackLaymanHtml = `<p>In simple terms, this report regarding <strong>${decodeAndCleanHtml(originalTitle)}</strong> highlights key developments that may impact citizens and stakeholders. On the positive side, constructive action and policy clarity can bring convenience, accountability, and opportunities for the public. On the other hand, any implementation delays, added costs, or operational disruptions could pose challenges for everyday people and affected sectors.</p>`;
-
+    // CRITICAL: Never draft or append a generic layman summary. If AI is unavailable, omit the layman section completely!
     const fallbackHtml = appendEditorialSections(
       firstParagraphBlock,
       verbatimRemainingBlocks,
-      fallbackLaymanHtml,
+      "",
       articleUrl,
       sourceName
     );
@@ -2696,23 +2727,13 @@ Generate exactly ${count} articles. Respond strictly in valid JSON matching this
       link: item.link || `https://${sourceName.toLowerCase().replace(/[^a-z0-9]/g, "")}.com.ng/news/article-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`,
       pubDate: currentIsoDate
     }));
-  } catch (e) {
+  } catch (e: any) {
+    if (isQuotaExceededError(e) || e.message === "AI_QUOTA_EXCEEDED") {
+      addLog("error", `Gemini AI Quota exceeded during alternate sourcing: ${e.message}. Halting alternate sourcing.`, "scraper");
+      throw new Error("AI_QUOTA_EXCEEDED");
+    }
     console.error("AI Alternate Sourcing Agent Failed", e);
-    const ts = Date.now();
-    return [
-      {
-        title: `Lagos Tech & Energy Summit Eyes Multi-Million Dollar Seed Funds for Local Innovators`,
-        link: `https://saamedia.com.ng/economy/lagos-tech-energy-summit-${ts}`,
-        description: `National technology leaders and private investors met in Lekki to address local framework integrations, digital skillups, and seed financing support from international venture capitals.`,
-        pubDate: new Date().toISOString()
-      },
-      {
-        title: `Federal Ministry Unveils New Infrastructure Framework to Boost Trade Along Western Corridors`,
-        link: `https://saamedia.com.ng/national/western-corridor-infrastructure-${ts + 1}`,
-        description: `Key transport authorities and logistics operators gathered in Abuja as new policy directives were introduced to ease interstate freight bottlenecks and boost regional commerce.`,
-        pubDate: new Date().toISOString()
-      }
-    ];
+    return [];
   }
 }
 
@@ -2856,8 +2877,10 @@ async function scrapeAndAutoProcess() {
     let newArticlesFoundCount = 0;
     const TARGET_ITEMS_PER_SOURCE = 5;
     const MAX_PAGES_TO_INSPECT = 6;
+    let aiQuotaExceededHalt = false;
 
     for (const source of sourcesToScan) {
+      if (aiQuotaExceededHalt) break;
       if (!source.enabled) continue;
 
       addLog("info", `Initiating batch harvest for ${source.name} (searching for up to ${TARGET_ITEMS_PER_SOURCE} previously un-scraped articles)...`, "scraper");
@@ -2912,20 +2935,32 @@ async function scrapeAndAutoProcess() {
       // If live scraping could not reach any fresh items (e.g. sandbox network limitations or exhausted archive)
       if (freshItemsForSource.length === 0) {
         addLog("warn", `Direct scraping yielded 0 new items for ${source.name}. Triggering AI Sourcing Agent fallback...`, "scraper");
-        const fallbackItems = await runAIAlternateScraper(source.name, source.type, TARGET_ITEMS_PER_SOURCE);
-        const currentDbCheck = loadDb();
-        for (const fbItem of fallbackItems) {
-          if (freshItemsForSource.length >= TARGET_ITEMS_PER_SOURCE) break;
-          if (!isArticleAlreadyScraped(fbItem.link, fbItem.title, currentDbCheck, source.name)) {
-            freshItemsForSource.push(fbItem);
+        try {
+          const fallbackItems = await runAIAlternateScraper(source.name, source.type, TARGET_ITEMS_PER_SOURCE);
+          const currentDbCheck = loadDb();
+          for (const fbItem of fallbackItems) {
+            if (freshItemsForSource.length >= TARGET_ITEMS_PER_SOURCE) break;
+            if (!isArticleAlreadyScraped(fbItem.link, fbItem.title, currentDbCheck, source.name)) {
+              freshItemsForSource.push(fbItem);
+            }
+          }
+        } catch (altErr: any) {
+          if (altErr.message === "AI_QUOTA_EXCEEDED" || isQuotaExceededError(altErr)) {
+            addLog("error", `Gemini AI Quota exceeded: ${altErr.message}. Halting scraping task completely.`, "summarizer");
+            aiQuotaExceededHalt = true;
+            break;
           }
         }
       }
+
+      if (aiQuotaExceededHalt) break;
 
       addLog("success", `Locked ${freshItemsForSource.length} fresh previous articles for ${source.name} in this batch. Commencing AI curation & title rephrasing...`, "scraper");
 
       // Process up to 5 fresh items for this source
       for (const item of freshItemsForSource) {
+        if (aiQuotaExceededHalt) break;
+
         // Double duplicate protection before expensive AI calls
         const currentDbCheck = loadDb();
         if (isArticleAlreadyScraped(item.link, item.title, currentDbCheck, source.name)) {
@@ -2952,6 +2987,11 @@ async function scrapeAndAutoProcess() {
           isEnriched = true;
           addLog("success", `AI rephrased headline & first paragraph with journalistic ethics: "${finalTitle}"`, "scraper");
         } catch (err: any) {
+          if (err.message === "AI_QUOTA_EXCEEDED" || isQuotaExceededError(err)) {
+            addLog("error", `Gemini AI Quota exceeded: ${err.message}. Halting scraping task completely. No further articles will be drafted until quota resets.`, "summarizer");
+            aiQuotaExceededHalt = true;
+            break; // Stop immediately! Do not save draft with generic/missing summary!
+          }
           if (err.message === "ARTICLE_404_NOT_FOUND") {
             addLog("warn", `Skipping 404 broken article link "${item.title}" from ${source.name}`, "scraper");
             continue;
@@ -2969,8 +3009,8 @@ async function scrapeAndAutoProcess() {
             if (blocks.length > 0) {
               const firstBlock = blocks[0];
               const restBlocks = blocks.slice(1);
-              const fallbackLayman = `<p>This report from ${source.name} highlights developments that may affect citizens and stakeholders positively through improved awareness and policy action, or negatively if operational challenges and costs arise.</p>`;
-              finalContent = appendEditorialSections(firstBlock, restBlocks, fallbackLayman, item.link, source.name);
+              // CRITICAL: Never draft or inject any generic/canned layman summary!
+              finalContent = appendEditorialSections(firstBlock, restBlocks, "", item.link, source.name);
               finalSummary = decodeAndCleanHtml(firstBlock).substring(0, 150) + "...";
               if (crawl.featuredImage) {
                 finalFeaturedImage = crawl.featuredImage;
@@ -2979,6 +3019,10 @@ async function scrapeAndAutoProcess() {
           } catch (_crawlErr) {
             // Keep default item.description
           }
+        }
+
+        if (aiQuotaExceededHalt) {
+          break; // Exit item loop without saving this un-summarized article
         }
 
         // Create fresh article and IMMEDIATELY persist to DB so it displays in "Editorial Queue" right away!
@@ -3020,14 +3064,23 @@ async function scrapeAndAutoProcess() {
           await new Promise(resolve => setTimeout(resolve, 600));
         }
       }
+
+      if (aiQuotaExceededHalt) {
+        addLog("warn", "Scraping batch terminated early because Gemini AI quota was exhausted.", "scraper");
+        break;
+      }
     }
 
-    addLog("success", `News Sourcing Batch Complete! Gathered ${newArticlesFoundCount} previously un-scraped articles across sources.`, "scraper");
+    if (aiQuotaExceededHalt) {
+      addLog("error", `Batch scraping halted completely due to Gemini AI quota limits. (Articles added before limit: ${newArticlesFoundCount})`, "scraper");
+    } else {
+      addLog("success", `News Sourcing Batch Complete! Gathered ${newArticlesFoundCount} previously un-scraped articles across sources.`, "scraper");
 
-    // If Auto-Publish is Enabled: Publish queued articles to WP and send gateway notifications
-    const finalDb = loadDb();
-    if (finalDb.config.schedulerEnabled && (newArticlesFoundCount > 0 || finalDb.articles.some((a: Article) => a.status === "scraped"))) {
-      await autoPublishFreshArticles();
+      // If Auto-Publish is Enabled: Publish queued articles to WP and send gateway notifications
+      const finalDb = loadDb();
+      if (finalDb.config.schedulerEnabled && (newArticlesFoundCount > 0 || finalDb.articles.some((a: Article) => a.status === "scraped"))) {
+        await autoPublishFreshArticles();
+      }
     }
   } finally {
     isScrapingInProgress = false;
@@ -3088,15 +3141,23 @@ async function autoPublishFreshArticles() {
   for (const article of pendingArticles) {
     try {
       // Step A: Only run AI Editorial Agent if not already enriched during scraping
-      if (!article.isEnriched || !article.content || !article.content.includes("What You Should Know")) {
+      if (!article.isEnriched) {
         addLog("info", `Curating Title & 1st Paragraph for: "${article.originalTitle}"`, "summarizer");
-        const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
-        article.title = aiEdit.title;
-        article.summary = aiEdit.summary;
-        article.category = aiEdit.category;
-        article.content = aiEdit.contentHtml;
-        article.featuredImage = aiEdit.featuredImage;
-        article.isEnriched = true;
+        try {
+          const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
+          article.title = aiEdit.title;
+          article.summary = aiEdit.summary;
+          article.category = aiEdit.category;
+          article.content = aiEdit.contentHtml;
+          article.featuredImage = aiEdit.featuredImage;
+          article.isEnriched = true;
+        } catch (enrichErr: any) {
+          if (enrichErr.message === "AI_QUOTA_EXCEEDED" || isQuotaExceededError(enrichErr)) {
+            addLog("error", `Gemini AI Quota exceeded during auto-publish: ${enrichErr.message}. Halting auto-publishing batch immediately.`, "publisher");
+            break;
+          }
+          addLog("warn", `Could not AI-curate before publish: ${enrichErr.message}. Proceeding with existing content.`, "publisher");
+        }
       }
       
       const paragraphsCount = countParagraphs(article.content);
@@ -3522,6 +3583,9 @@ app.post("/api/articles/:id/enrich", async (req, res) => {
 
     res.json({ status: "ok", article });
   } catch (err: any) {
+    if (err.message === "AI_QUOTA_EXCEEDED" || isQuotaExceededError(err)) {
+      return res.status(429).json({ error: "Gemini AI Quota exceeded. AI enrichment stopped completely. Please wait or check your Gemini API quota." });
+    }
     res.status(500).json({ error: `Enrichment failed: ${err.message}` });
   }
 });
@@ -3592,15 +3656,21 @@ async function executeManualApproveAndPublish(
   }
 
   try {
-    // 1. Editorial Curation if not enriched yet or missing What You Should Know section
-    if (!article.isEnriched || !article.content || !article.content.includes("What You Should Know")) {
-      const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
-      if (!edits?.title) article.title = aiEdit.title;
-      if (!edits?.summary) article.summary = aiEdit.summary;
-      if (!edits?.category) article.category = aiEdit.category;
-      if (!edits?.content) article.content = aiEdit.contentHtml;
-      article.featuredImage = aiEdit.featuredImage;
-      article.isEnriched = true;
+    // 1. Editorial Curation if not enriched yet
+    if (!article.isEnriched) {
+      try {
+        const aiEdit = await runAIElegancyAgent(article.originalTitle || article.title, article.content, article.url, article.source);
+        if (!edits?.title) article.title = aiEdit.title;
+        if (!edits?.summary) article.summary = aiEdit.summary;
+        if (!edits?.category) article.category = aiEdit.category;
+        if (!edits?.content) article.content = aiEdit.contentHtml;
+        article.featuredImage = aiEdit.featuredImage;
+        article.isEnriched = true;
+      } catch (aiErr: any) {
+        if (aiErr.message === "AI_QUOTA_EXCEEDED" || isQuotaExceededError(aiErr)) {
+          addLog("warn", `Gemini AI Quota exceeded during manual publish curation. Publishing verbatim without layman section.`, "publisher");
+        }
+      }
     }
 
     const paragraphsCount = countParagraphs(article.content);
