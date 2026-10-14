@@ -2519,13 +2519,14 @@ MEDIA ASSETS:
 ${inputImagesText}
 
 STRICT EDITORIAL SPECIFICATIONS:
-1. Magnetic, High-Engagement & Ethically Grounded Headline ("title"):
-   - Rephrase the Isolated Original Title into an irresistible, high-engagement headline crafted to strongly urge the audience to click and open the article, while strictly maintaining the highest standards and ethics of journalism.
-   - PULL FACTOR & CURIOSITY: Give the headline powerful narrative tension, urgency, or curiosity—spotlight the real-world impact, high stakes, key revelation, policy shift, or public consequences that make the story unmissable for readers.
-   - STRICT JOURNALISTIC ETHICS MANDATE: Absolutely NO dishonest, deceitful, or sensationalist clickbait. Do NOT fabricate quotes, do NOT exaggerate casualty or financial figures, and do NOT distort verified facts. Every claim, name, institution, date, and detail must remain 100% faithful, accurate, and truthful to the original report.
-   - Core details such as prominent figures (e.g. Tinubu, CBN, EFCC, NNPCL, Governors, Ministers), key dates, and exact policy names must be preserved accurately for journalistic authority, integrity, and SEO discovery.
-   - Eliminate dry, bureaucratic, or boring passive phrasing in favor of punchy, active verbs and compelling editorial hooks (e.g., "Why [Agency]...", "How [Decision] Impacts [Public]...", "Crucial Details Emerge As...", "What Citizens Need To Know About...", "Inside The Push To...").
-   - Do NOT include any hashtags (such as #HotTopics, #BAT100Days, #Beyond100Days) or breadcrumbs in the paraphrased title.
+1. Short, Simple & Compelling Headline ("title"):
+   - LENGTH & BREVITY: Keep the headline SHORT (target 6 to 12 words, strictly under 75 characters). Everyday readers must be able to understand the headline instantly at a glance.
+   - SIMPLE & DIRECT: Use plain, conversational, everyday English. Avoid complex vocabulary, long-winded phrasing, or bureaucratic jargon.
+   - PRESERVE THE CORE MESSAGE: Accurately preserve the heart of the story—who did what, what decision was made, or what major event occurred.
+   - URGE AUDIENCE TO OPEN (PULL FACTOR): Formulate the headline with punchy, active verbs and clear real-world outcomes so readers feel an immediate urge to open and read the story, while keeping it natural and engaging.
+   - ELIMINATE GENERIC AI CLICHÉS (MANDATORY): Never use repetitive, templated AI formulas such as "Here Is Why...", "Crucial Details Emerge As...", "What You Need To Know About...", "Inside The Push To...", "Revealed:...", "Shock As...", "See Why...", or "Why [Agency]...". Each headline must feel unique, fresh, and organically tailored to this specific report.
+   - STRICT JOURNALISTIC ETHICS: 100% faithful and truthful to the original report. Never fabricate claims, quotes, or sensationalize figures. Keep prominent names (e.g. Tinubu, CBN, EFCC, NNPCL, Governors, Ministers) and institutions accurate.
+   - Do NOT include any hashtags (e.g. #HotTopics) or breadcrumbs in the title.
 2. Paraphrase ONLY the Isolated First Paragraph ("paraphrasedFirstParagraph"):
    - Refine and paraphrase ONLY the Isolated First Paragraph above while strictly preserving its core message, announcements, names, dates, locations, and key facts.
    - Do NOT include any breadcrumbs, inline related news links, or hashtag words (like #HotTopics, #BAT100Days, #Beyond100Days) in the paragraph.
@@ -2545,7 +2546,7 @@ STRICT EDITORIAL SPECIFICATIONS:
 
 Respond strictly in valid JSON format matching this schema:
 {
-  "title": "Magnetic, high-engagement headline that urges readers to open the article while upholding strict journalistic truth and ethics",
+  "title": "Short (6-12 words), simple, and compelling headline that captures the news event clearly and urges readers to open it",
   "summary": "1-2 sentence quick news summary",
   "category": "One of: Politics, Business, Security, Economy, National",
   "featuredImage": "Selected image URL string",
@@ -2631,8 +2632,12 @@ Respond strictly in valid JSON format matching this schema:
       sourceName
     );
 
+    let curatedTitle = (parsed.title || originalTitle).trim();
+    curatedTitle = curatedTitle.replace(/^["'“‘]+|["'”’]+$/g, "").trim();
+    curatedTitle = cleanScrapedTitle(curatedTitle) || originalTitle;
+
     return {
-      title: cleanScrapedTitle(parsed.title || originalTitle) || originalTitle,
+      title: curatedTitle,
       summary: parsed.summary || firstParagraphPlain.substring(0, 160),
       category: parsed.category || "National",
       contentHtml: finalContentHtml,
@@ -2687,12 +2692,12 @@ Generate ${count} distinct, highly authentic, realistic Nigerian current news st
 TOPICS: National policy briefings, central bank actions, security updates, economic reforms, public sector appointments, infrastructural developments in Abuja/Lagos/Nigeria.
 
 HEADLINE REQUIREMENT:
-Write magnetic, high-engagement headlines that strongly urge readers to open and read the story immediately, while strictly adhering to truthful journalistic integrity (no fake superlatives, no deceptive claims, accurate names and facts).
+Write short (6-12 words), simple, and direct headlines that clearly capture the core news message and urge readers to open the story, while strictly adhering to truthful journalistic integrity. Avoid generic templates (never use 'Inside the...', 'Revealed:', 'What you need to know', 'Shock As').
 
 Generate exactly ${count} articles. Respond strictly in valid JSON matching this schema:
 [
   {
-    "title": "Magnetic, high-engagement journalistic headline that urges readers to open the article",
+    "title": "Short, simple, and high-interest headline (6-12 words) capturing the news development clearly",
     "link": "https://${sourceName.toLowerCase().replace(/[^a-z0-9]/g, "")}.com.ng/news/article-${Date.now()}-${Math.random().toString(36).substring(2, 7)}",
     "description": "3-4 sentences of substantial authentic detail and context about the story.",
     "pubDate": "${currentIsoDate}"
